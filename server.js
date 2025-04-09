@@ -110,3 +110,44 @@ server.post('/api/register', (req, res) => {
         });
     });
 });
+
+//criar post
+server.post('/api/posts', (req, res) => {
+    const { user_id, title, content, community, tags, media_url } = req.body;
+
+    if (!user_id || !title || !content) {
+        return res.status(400).send({ status: false, message: "Campos obrigatórios ausentes" });
+    }
+
+    const insertPostSql = `
+        INSERT INTO posts (user_id, title, content, community, tags, media_url)
+        VALUES (?, ?, ?, ?, ?, ?)
+    `;
+
+    const tagsAsString = tags.join(', '); 
+
+    db.query(insertPostSql, [user_id, title, content, community || null, tagsAsString, media_url || null], (error, result) => {
+        if (error) {
+            console.error("Erro ao inserir post:", error);
+            return res.status(500).send({ status: false, message: "Erro ao salvar o post" });
+        }
+
+        const postId = result.insertId;
+
+        if (tags.length > 0) {
+            const tagValues = tags.map(tag => [postId, tag.trim().toLowerCase()]);
+            const insertTagsSql = "INSERT INTO post_tags (post_id, tag) VALUES ?";
+
+            db.query(insertTagsSql, [tagValues], (tagErr) => {
+                if (tagErr) {
+                    console.error("Erro ao inserir tags:", tagErr);
+                    return res.status(500).send({ status: false, message: "Erro ao salvar as tags do post" });
+                }
+
+                res.send({ status: true, message: "Post e tags criados com sucesso", postId });
+            });
+        } else {
+            res.send({ status: true, message: "Post criado com sucesso (sem tags)", postId });
+        }
+    });
+});
