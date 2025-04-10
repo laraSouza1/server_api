@@ -124,7 +124,7 @@ server.post('/api/posts', (req, res) => {
         VALUES (?, ?, ?, ?, ?, ?)
     `;
 
-    const tagsAsString = tags.join(', '); 
+    const tagsAsString = tags.join(', ');
 
     db.query(insertPostSql, [user_id, title, content, community || null, tagsAsString, media_url || null], (error, result) => {
         if (error) {
@@ -150,4 +150,122 @@ server.post('/api/posts', (req, res) => {
             res.send({ status: true, message: "Post criado com sucesso (sem tags)", postId });
         }
     });
+});
+
+// View todos posts
+server.get("/api/posts", (req, res) => {
+    const userId = parseInt(req.query.userId) || 0;
+
+    const sql = `
+        SELECT p.*,
+            u.username,
+            u.name,
+            u.profile_pic,
+            (SELECT COUNT(*) FROM likes l WHERE l.post_id = p.id) AS likes_count,
+            (SELECT COUNT(*) FROM likes l WHERE l.user_id = ? AND l.post_id = p.id) > 0 AS user_liked,
+            (SELECT COUNT(*) FROM saved_posts s WHERE s.post_id = p.id AND s.user_id = ?) > 0 AS user_saved
+        FROM posts p
+        JOIN users u ON p.user_id = u.id
+        ORDER BY p.created_at DESC
+        `;
+
+    db.query(sql, [userId, userId], (error, posts) => {
+        if (error) {
+            console.error("Erro ao buscar posts:", error);
+            return res.status(500).send({ status: false, message: "Erro ao buscar posts" });
+        }
+
+        const postIds = posts.map(post => post.id);
+
+        if (postIds.length === 0) {
+            return res.send({ status: true, data: [] });
+        }
+
+        const tagSql = `SELECT * FROM post_tags WHERE post_id IN (?)`;
+
+        db.query(tagSql, [postIds], (tagError, tagsResult) => {
+            if (tagError) {
+                console.error("Erro ao buscar tags:", tagError);
+                return res.status(500).send({ status: false, message: "Erro ao buscar tags" });
+            }
+
+            const tagsMap = {};
+            tagsResult.forEach(tag => {
+                if (!tagsMap[tag.post_id]) tagsMap[tag.post_id] = [];
+                tagsMap[tag.post_id].push(tag.tag);
+            });
+
+            const fullPosts = posts.map(post => ({
+                ...post,
+                tags: tagsMap[post.id] || [],
+                user_liked: post.user_liked,
+                user_saved: post.user_saved
+            }));
+            res.send({ status: true, data: fullPosts });
+        });
+    });
+
+});
+
+
+// Adiciona like
+server.post("/api/likes", (req, res) => {
+    const { user_id, post_id } = req.body;
+    const sql = `INSERT INTO likes (user_id, post_id) VALUES (?, ?)`;
+
+    db.query(sql, [user_id, post_id], (error) => {
+        if (error) {
+            console.error("Erro ao dar like:", error);
+            return res.status(500).send({ status: false, message: "Erro ao dar like" });
+        }
+        res.send({ status: true });
+    });
+
+});
+
+// Remove like
+server.delete("/api/likes/:userId/:postId", (req, res) => {
+    const { userId, postId } = req.params;
+    const sql = `DELETE FROM likes WHERE user_id = ? AND post_id = ?`;
+
+    db.query(sql, [userId, postId], (error) => {
+        if (error) {
+            console.error("Erro ao remover like:", error);
+            return res.status(500).send({ status: false, message: "Erro ao remover like" });
+        }
+        res.send({ status: true });
+    });
+});
+
+// Adiciona postagem salva
+server.post("/api/saved_posts", (req, res) => {
+    const { user_id, post_id } = req.body;
+    const sql = `INSERT INTO saved_posts (user_id, post_id) VALUES (?, ?)`;
+
+    db.query(sql, [user_id, post_id], (error) => {
+        if (error) {
+            console.error("Erro ao salvar postagem:", error);
+            return res.status(500).send({ status: false, message: "Erro ao salvar postagem" });
+        }
+        res.send({ status: true });
+    });
+
+});
+
+
+// Remove postagem salva
+server.delete("/api/saved_posts/:userId/:postId", (req, res) => {
+
+    const { userId, postId } = req.params;
+    const sql = `DELETE FROM saved_posts WHERE user_id = ? AND post_id = ?`;
+
+    db.query(sql, [userId, postId], (error) => {
+        if (error) {
+            console.error("Erro ao remover postagem salva:", error);
+            return res.status(500).send({ status: false, message: "Erro ao remover postagem salva" });
+        }
+        res.send({ status: true });
+
+    });
+
 });
