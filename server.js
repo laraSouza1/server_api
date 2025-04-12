@@ -24,7 +24,7 @@ db.connect(function (error) {
     }
 });
 
-//Esatbelecer porta
+//esatbelecer porta
 server.listen(8085, function check(error) {
     if (error) {
         console.log("Erro", error);
@@ -34,7 +34,22 @@ server.listen(8085, function check(error) {
     }
 });
 
-//View todos users
+//const para salvar imagens na bd
+const multer = require('multer');
+const path = require('path');
+
+const storage = multer.diskStorage({
+    destination: function (req, file, cb) {
+        cb(null, 'uploads/'); //tdas as imgs relacionadas a perfil vão para aqui
+    },
+    filename: function (req, file, cb) {
+        cb(null, Date.now() + '-' + file.originalname);
+    }
+});
+
+const upload = multer({ storage: storage });
+
+//view todos users
 server.get("/api/users", (req, res) => {
     const sql = "SELECT * FROM users";
     db.query(sql, function (error, result) {
@@ -269,3 +284,64 @@ server.delete("/api/saved_posts/:userId/:postId", (req, res) => {
     });
 
 });
+
+// Atualizar perfil
+server.put('/api/users/:id', (req, res) => {
+    const { id } = req.params;
+    const { username, name, email, bio, profile_pic_url, cover_pic_url } = req.body;
+
+    const sql = `
+        UPDATE users
+        SET username = ?, name = ?, email = ?, bio = ?, profile_pic = ?, cover_pic = ?
+        WHERE id = ?
+    `;
+
+    console.log("SQL:", sql);
+    console.log("Valores:", [username, name, email, bio, profile_pic_url, cover_pic_url, id]);
+
+    db.query(sql, [username, name, email, bio, profile_pic_url, cover_pic_url, id], (error, result) => {
+        if (error) {
+            console.error("Erro ao atualizar o perfil:", error);
+            return res.status(500).send({ status: false, message: "Erro ao atualizar o perfil" });
+        }
+
+        console.log("Resultado da query:", result);
+        res.send({ status: true, message: "Perfil atualizado com sucesso!" });
+    });
+});
+
+//ver se já existe usuário com determinado user ao editar perfil
+server.get('/api/check-username/:username', (req, res) => {
+    const { username } = req.params;
+    const userId = req.query.currentUserId;
+
+    let sql = `SELECT COUNT(*) AS count FROM users WHERE username = ?`;
+    let params = [username];
+
+    if (userId) {
+        sql += ` AND id != ?`;
+        params.push(userId);
+    }
+
+    db.query(sql, params, (error, result) => {
+        if (error) {
+            console.error("Erro ao verificar o username:", error);
+            return res.status(500).send({ status: false, message: "Erro ao verificar username" });
+        }
+
+        const usernameExists = result[0].count > 0;
+        res.send({ exists: usernameExists });
+    });
+});
+
+//upload de imagens (perfil)
+server.post('/api/upload', upload.single('image'), (req, res) => {
+    if (!req.file) {
+        return res.status(400).send({ status: false, message: 'Nenhum arquivo enviado.' });
+    }
+
+    const imageUrl = `http://localhost:8085/uploads/${req.file.filename}`;
+    res.send({ status: true, url: imageUrl });
+});
+
+server.use('/uploads', express.static(path.join(__dirname, 'uploads')));
