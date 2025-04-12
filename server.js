@@ -345,3 +345,163 @@ server.post('/api/upload', upload.single('image'), (req, res) => {
 });
 
 server.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+//view posts criados pelo usuário logado
+server.get("/api/posts/user/:userId", (req, res) => {
+    const userId = parseInt(req.params.userId);
+
+    const sql = `
+      SELECT p.*,
+        u.username,
+        u.name,
+        u.profile_pic,
+        (SELECT COUNT(*) FROM likes l WHERE l.post_id = p.id) AS likes_count,
+        (SELECT COUNT(*) FROM likes l WHERE l.user_id = ? AND l.post_id = p.id) > 0 AS user_liked,
+        (SELECT COUNT(*) FROM saved_posts s WHERE s.post_id = p.id AND s.user_id = ?) > 0 AS user_saved
+      FROM posts p
+      JOIN users u ON p.user_id = u.id
+      WHERE p.user_id = ?
+      ORDER BY p.created_at DESC
+    `;
+
+    db.query(sql, [userId, userId, userId], (error, posts) => {
+        if (error) {
+            console.error("Erro ao buscar posts do usuário:", error);
+            return res.status(500).send({ status: false, message: "Erro ao buscar posts do usuário" });
+        }
+
+        const postIds = posts.map(post => post.id);
+        if (postIds.length === 0) {
+            return res.send({ status: true, data: [] });
+        }
+
+        const tagSql = `SELECT * FROM post_tags WHERE post_id IN (?)`;
+        db.query(tagSql, [postIds], (tagError, tagsResult) => {
+            if (tagError) {
+                console.error("Erro ao buscar tags:", tagError);
+                return res.status(500).send({ status: false, message: "Erro ao buscar tags" });
+            }
+
+            const tagsMap = {};
+            tagsResult.forEach(tag => {
+                if (!tagsMap[tag.post_id]) tagsMap[tag.post_id] = [];
+                tagsMap[tag.post_id].push(tag.tag);
+            });
+
+            const fullPosts = posts.map(post => ({
+                ...post,
+                tags: tagsMap[post.id] || [],
+                user_liked: post.user_liked,
+                user_saved: post.user_saved
+            }));
+
+            res.send({ status: true, data: fullPosts });
+        });
+    });
+});
+
+//buscar posts curtidos por um usuário
+server.get("/api/posts/liked/:userId", (req, res) => {
+    const userId = parseInt(req.params.userId);
+
+    const sql = `
+      SELECT p.*,
+             u.username,
+             u.name,
+             u.profile_pic,
+             (SELECT COUNT(*) FROM likes l WHERE l.post_id = p.id) AS likes_count,
+             true AS user_liked,
+             (SELECT COUNT(*) FROM saved_posts s WHERE s.post_id = p.id AND s.user_id = ?) > 0 AS user_saved
+      FROM posts p
+      JOIN likes l ON p.id = l.post_id
+      JOIN users u ON p.user_id = u.id
+      WHERE l.user_id = ?
+      ORDER BY p.created_at DESC
+    `;
+
+    db.query(sql, [userId, userId], (error, posts) => {
+        if (error) {
+            console.error("Erro ao buscar posts curtidos:", error);
+            return res.status(500).send({ status: false, message: "Erro ao buscar posts curtidos" });
+        }
+
+        const postIds = posts.map(post => post.id);
+        if (postIds.length === 0) return res.send({ status: true, data: [] });
+
+        const tagSql = `SELECT * FROM post_tags WHERE post_id IN (?)`;
+        db.query(tagSql, [postIds], (tagError, tagsResult) => {
+            if (tagError) {
+                console.error("Erro ao buscar tags:", tagError);
+                return res.status(500).send({ status: false, message: "Erro ao buscar tags" });
+            }
+
+            const tagsMap = {};
+            tagsResult.forEach(tag => {
+                if (!tagsMap[tag.post_id]) tagsMap[tag.post_id] = [];
+                tagsMap[tag.post_id].push(tag.tag);
+            });
+
+            const fullPosts = posts.map(post => ({
+                ...post,
+                tags: tagsMap[post.id] || [],
+                user_liked: true,
+                user_saved: post.user_saved
+            }));
+
+            res.send({ status: true, data: fullPosts });
+        });
+    });
+});
+
+//buscar posts salvos por um usuário
+server.get("/api/posts/saved/:userId", (req, res) => {
+    const userId = parseInt(req.params.userId);
+
+    const sql = `
+      SELECT p.*,
+             u.username,
+             u.name,
+             u.profile_pic,
+             (SELECT COUNT(*) FROM likes l WHERE l.post_id = p.id) AS likes_count,
+             (SELECT COUNT(*) FROM likes l WHERE l.user_id = ? AND l.post_id = p.id) > 0 AS user_liked,
+             true AS user_saved
+      FROM posts p
+      JOIN saved_posts s ON p.id = s.post_id
+      JOIN users u ON p.user_id = u.id
+      WHERE s.user_id = ?
+      ORDER BY p.created_at DESC
+    `;
+
+    db.query(sql, [userId, userId], (error, posts) => {
+        if (error) {
+            console.error("Erro ao buscar posts salvos:", error);
+            return res.status(500).send({ status: false, message: "Erro ao buscar posts salvos" });
+        }
+
+        const postIds = posts.map(post => post.id);
+        if (postIds.length === 0) return res.send({ status: true, data: [] });
+
+        const tagSql = `SELECT * FROM post_tags WHERE post_id IN (?)`;
+        db.query(tagSql, [postIds], (tagError, tagsResult) => {
+            if (tagError) {
+                console.error("Erro ao buscar tags:", tagError);
+                return res.status(500).send({ status: false, message: "Erro ao buscar tags" });
+            }
+
+            const tagsMap = {};
+            tagsResult.forEach(tag => {
+                if (!tagsMap[tag.post_id]) tagsMap[tag.post_id] = [];
+                tagsMap[tag.post_id].push(tag.tag);
+            });
+
+            const fullPosts = posts.map(post => ({
+                ...post,
+                tags: tagsMap[post.id] || [],
+                user_liked: post.user_liked,
+                user_saved: true
+            }));
+
+            res.send({ status: true, data: fullPosts });
+        });
+    });
+});
