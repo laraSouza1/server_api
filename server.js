@@ -346,7 +346,7 @@ server.post('/api/upload', upload.single('image'), (req, res) => {
 
 server.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-//view posts criados pelo usuário logado
+//view posts criados pelo usuário logado/cadastrado
 server.get("/api/posts/user/:userId", (req, res) => {
     const userId = parseInt(req.params.userId);
 
