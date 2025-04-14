@@ -167,7 +167,7 @@ server.post('/api/posts', (req, res) => {
     });
 });
 
-// View todos posts
+//view todos posts
 server.get("/api/posts", (req, res) => {
     const userId = parseInt(req.query.userId) || 0;
 
@@ -222,8 +222,20 @@ server.get("/api/posts", (req, res) => {
 
 });
 
+//buscars todas as tags
+server.get("/api/tags", (req, res) => {
+    const sql = `SELECT DISTINCT tag FROM post_tags ORDER BY tag`;
 
-// Adiciona like
+    db.query(sql, (error, result) => {
+        if (error) {
+            console.error("Erro ao buscar tags:", error);
+            return res.status(500).send({ status: false, message: "Erro ao buscar tags" });
+        }
+        res.send({ status: true, data: result });
+    });
+});
+
+//adiciona like
 server.post("/api/likes", (req, res) => {
     const { user_id, post_id } = req.body;
     const sql = `INSERT INTO likes (user_id, post_id) VALUES (?, ?)`;
