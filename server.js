@@ -8,7 +8,7 @@ const server = express();
 server.use(cors());
 server.use(bodyParser.json());
 
-//Conexão com a BD
+//conexão com a BD
 const db = mysql.createConnection({
     host: "localhost",
     user: "root",
@@ -62,7 +62,7 @@ server.get("/api/users", (req, res) => {
     });
 });
 
-//Login
+//login
 server.post('/api/login', (req, res) => {
     const { usernameOrEmail, password } = req.body;
     console.log("Tentativa de login com:", { usernameOrEmail, password });
@@ -75,7 +75,7 @@ server.post('/api/login', (req, res) => {
         }
 
         if (result.length === 0) {
-            console.log("Usuário não encontrado:", usernameOrEmail); // Log de usuário não encontrado
+            console.log("Usuário não encontrado:", usernameOrEmail);
             return res.status(401).send({ status: false, message: "Usuário não encontrado" });
         }
 
@@ -91,7 +91,7 @@ server.post('/api/login', (req, res) => {
     });
 });
 
-//Cadastro
+//cadastro
 server.post('/api/register', (req, res) => {
     const { username, name, email, password } = req.body;
     console.log("Tentativa de cadastro com:", { username, name, email });
@@ -170,8 +170,9 @@ server.post('/api/posts', (req, res) => {
 //view todos posts
 server.get("/api/posts", (req, res) => {
     const userId = parseInt(req.query.userId) || 0;
+    const community = req.query.community || null;
 
-    const sql = `
+    let sql = `
         SELECT p.*,
             u.username,
             u.name,
@@ -181,10 +182,18 @@ server.get("/api/posts", (req, res) => {
             (SELECT COUNT(*) FROM saved_posts s WHERE s.post_id = p.id AND s.user_id = ?) > 0 AS user_saved
         FROM posts p
         JOIN users u ON p.user_id = u.id
-        ORDER BY p.created_at DESC
-        `;
+    `;
 
-    db.query(sql, [userId, userId], (error, posts) => {
+    const params = [userId, userId];
+
+    if (community) {
+        sql += ` WHERE p.community = ?`;
+        params.push(community);
+    }
+
+    sql += ` ORDER BY p.created_at DESC`;
+
+    db.query(sql, params, (error, posts) => {
         if (error) {
             console.error("Erro ao buscar posts:", error);
             return res.status(500).send({ status: false, message: "Erro ao buscar posts" });
@@ -216,10 +225,10 @@ server.get("/api/posts", (req, res) => {
                 user_liked: post.user_liked,
                 user_saved: post.user_saved
             }));
+
             res.send({ status: true, data: fullPosts });
         });
     });
-
 });
 
 //buscars todas as tags
@@ -250,7 +259,7 @@ server.post("/api/likes", (req, res) => {
 
 });
 
-// Remove like
+//remove like
 server.delete("/api/likes/:userId/:postId", (req, res) => {
     const { userId, postId } = req.params;
     const sql = `DELETE FROM likes WHERE user_id = ? AND post_id = ?`;
@@ -264,7 +273,7 @@ server.delete("/api/likes/:userId/:postId", (req, res) => {
     });
 });
 
-// Adiciona postagem salva
+//adiciona postagem salva
 server.post("/api/saved_posts", (req, res) => {
     const { user_id, post_id } = req.body;
     const sql = `INSERT INTO saved_posts (user_id, post_id) VALUES (?, ?)`;
@@ -280,7 +289,7 @@ server.post("/api/saved_posts", (req, res) => {
 });
 
 
-// Remove postagem salva
+//remove postagem salva
 server.delete("/api/saved_posts/:userId/:postId", (req, res) => {
 
     const { userId, postId } = req.params;
@@ -297,7 +306,7 @@ server.delete("/api/saved_posts/:userId/:postId", (req, res) => {
 
 });
 
-// Atualizar perfil
+//atualizar perfil
 server.put('/api/users/:id', (req, res) => {
     const { id } = req.params;
     const { username, name, email, bio, profile_pic_url, cover_pic_url } = req.body;
@@ -515,5 +524,21 @@ server.get("/api/posts/saved/:userId", (req, res) => {
 
             res.send({ status: true, data: fullPosts });
         });
+    });
+});
+
+//buscar usuário por id
+server.get("/api/users/:id", (req, res) => {
+    const userId = req.params.id;
+    const sql = "SELECT * FROM users WHERE id = ?";
+    db.query(sql, [userId], function (error, result) {
+        if (error) {
+            console.error("Erro ao buscar usuário:", error);
+            res.status(500).send({ status: false, message: "Erro ao acessar a base de dados" });
+        } else if (result.length === 0) {
+            res.status(404).send({ status: false, message: "Usuário não encontrado" });
+        } else {
+            res.send({ status: true, data: result[0] });
+        }
     });
 });
