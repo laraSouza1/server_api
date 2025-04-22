@@ -215,7 +215,7 @@ server.get("/api/posts", (req, res) => {
         `);
         const likeSearch = `%${search}%`;
         params.push(likeSearch, likeSearch, likeSearch, likeSearch, likeSearch);
-    }    
+    }
 
     if (whereClauses.length > 0) {
         sql += ' WHERE ' + whereClauses.join(' AND ');
@@ -257,6 +257,43 @@ server.get("/api/posts", (req, res) => {
             }));
 
             res.send({ status: true, data: fullPosts });
+        });
+    });
+});
+
+//pegar um post por id
+server.get("/api/posts/:id", (req, res) => {
+    const postId = parseInt(req.params.id);
+    const userId = parseInt(req.query.userId) || 0;
+
+    const sql = `
+      SELECT p.*,
+        u.username,
+        u.name,
+        u.profile_pic,
+        (SELECT COUNT(*) FROM likes l WHERE l.post_id = p.id) AS likes_count,
+        (SELECT COUNT(*) FROM likes l WHERE l.user_id = ? AND l.post_id = p.id) > 0 AS user_liked,
+        (SELECT COUNT(*) FROM saved_posts s WHERE s.post_id = p.id AND s.user_id = ?) > 0 AS user_saved
+      FROM posts p
+      JOIN users u ON p.user_id = u.id
+      WHERE p.id = ?
+    `;
+
+    db.query(sql, [userId, userId, postId], (error, results) => {
+        if (error || results.length === 0) {
+            return res.status(404).send({ status: false, message: "Post não encontrado" });
+        }
+
+        const post = results[0];
+
+        const tagSql = `SELECT tag FROM post_tags WHERE post_id = ?`;
+        db.query(tagSql, [postId], (tagErr, tagsResult) => {
+            if (tagErr) {
+                return res.status(500).send({ status: false, message: "Erro ao buscar tags" });
+            }
+
+            const tags = tagsResult.map(t => t.tag);
+            res.send({ status: true, data: { ...post, tags } });
         });
     });
 });
