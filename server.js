@@ -49,6 +49,8 @@ const storage = multer.diskStorage({
 
 const upload = multer({ storage: storage });
 
+//---------------TUDO EM RELAÇÃO A USERS---------------//
+
 //view todos users
 server.get("/api/users", (req, res) => {
     const search = req.query.search || '';
@@ -135,6 +137,69 @@ server.post('/api/register', (req, res) => {
         });
     });
 });
+
+//atualizar perfil
+server.put('/api/users/:id', (req, res) => {
+    const { id } = req.params;
+    const { username, name, email, bio, profile_pic_url, cover_pic_url } = req.body;
+
+    const sql = `
+        UPDATE users
+        SET username = ?, name = ?, email = ?, bio = ?, profile_pic = ?, cover_pic = ?
+        WHERE id = ?
+    `;
+
+    console.log("SQL:", sql);
+    console.log("Valores:", [username, name, email, bio, profile_pic_url, cover_pic_url, id]);
+
+    db.query(sql, [username, name, email, bio, profile_pic_url, cover_pic_url, id], (error, result) => {
+        if (error) {
+            console.error("Erro ao atualizar o perfil:", error);
+            return res.status(500).send({ status: false, message: "Erro ao atualizar o perfil" });
+        }
+
+        console.log("Resultado da query:", result);
+        res.send({ status: true, message: "Perfil atualizado com sucesso!" });
+    });
+});
+
+//ver se já existe usuário com determinado user ao editar perfil
+server.get('/api/check-username/:username', (req, res) => {
+    const { username } = req.params;
+    const userId = req.query.currentUserId;
+
+    let sql = `SELECT COUNT(*) AS count FROM users WHERE username = ?`;
+    let params = [username];
+
+    if (userId) {
+        sql += ` AND id != ?`;
+        params.push(userId);
+    }
+
+    db.query(sql, params, (error, result) => {
+        if (error) {
+            console.error("Erro ao verificar o username:", error);
+            return res.status(500).send({ status: false, message: "Erro ao verificar username" });
+        }
+
+        const usernameExists = result[0].count > 0;
+        res.send({ exists: usernameExists });
+    });
+});
+
+//upload de imagens (perfil)
+server.post('/api/upload', upload.single('image'), (req, res) => {
+    if (!req.file) {
+        return res.status(400).send({ status: false, message: 'Nenhum arquivo enviado.' });
+    }
+
+    const imageUrl = `http://localhost:8085/uploads/${req.file.filename}`;
+    res.send({ status: true, url: imageUrl });
+});
+
+server.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+//---------------TUDO EM RELAÇÃO A POSTS---------------//
 
 //criar post
 server.post('/api/posts', (req, res) => {
@@ -298,6 +363,51 @@ server.get("/api/posts/:id", (req, res) => {
     });
 });
 
+//atualizar um post
+server.put('/api/posts/:id', (req, res) => {
+    const postId = req.params.id;
+    const { title, content, community, tags } = req.body;
+
+    const updateSql = `
+      UPDATE posts SET title = ?, content = ?, community = ?, tags = ? WHERE id = ?
+    `;
+
+    db.query(updateSql, [title, content, community || null, tags.join(', '), postId], (err) => {
+        if (err) return res.status(500).send({ status: false, message: "Erro ao atualizar o post" });
+
+        const deleteTagsSql = "DELETE FROM post_tags WHERE post_id = ?";
+        db.query(deleteTagsSql, [postId], () => {
+            if (tags.length > 0) {
+                const tagValues = tags.map(tag => [postId, tag.trim().toLowerCase()]);
+                const insertTagsSql = "INSERT INTO post_tags (post_id, tag) VALUES ?";
+                db.query(insertTagsSql, [tagValues], () => {
+                    res.send({ status: true, message: "Post atualizado com sucesso" });
+                });
+            } else {
+                res.send({ status: true, message: "Post atualizado (sem tags)" });
+            }
+        });
+    });
+});
+
+//deletar um post
+server.delete('/api/posts/:id', (req, res) => {
+    const postId = req.params.id;
+
+    const deleteTagsSql = "DELETE FROM post_tags WHERE post_id = ?";
+    const deletePostSql = "DELETE FROM posts WHERE id = ?";
+
+    db.query(deleteTagsSql, [postId], (err) => {
+        if (err) return res.status(500).send({ status: false, message: "Erro ao remover tags do post" });
+
+        db.query(deletePostSql, [postId], (err2) => {
+            if (err2) return res.status(500).send({ status: false, message: "Erro ao deletar post" });
+
+            res.send({ status: true, message: "Post deletado com sucesso" });
+        });
+    });
+});
+
 //buscars todas as tags
 server.get("/api/tags", (req, res) => {
     const search = req.query.search || '';
@@ -385,67 +495,6 @@ server.delete("/api/saved_posts/:userId/:postId", (req, res) => {
     });
 
 });
-
-//atualizar perfil
-server.put('/api/users/:id', (req, res) => {
-    const { id } = req.params;
-    const { username, name, email, bio, profile_pic_url, cover_pic_url } = req.body;
-
-    const sql = `
-        UPDATE users
-        SET username = ?, name = ?, email = ?, bio = ?, profile_pic = ?, cover_pic = ?
-        WHERE id = ?
-    `;
-
-    console.log("SQL:", sql);
-    console.log("Valores:", [username, name, email, bio, profile_pic_url, cover_pic_url, id]);
-
-    db.query(sql, [username, name, email, bio, profile_pic_url, cover_pic_url, id], (error, result) => {
-        if (error) {
-            console.error("Erro ao atualizar o perfil:", error);
-            return res.status(500).send({ status: false, message: "Erro ao atualizar o perfil" });
-        }
-
-        console.log("Resultado da query:", result);
-        res.send({ status: true, message: "Perfil atualizado com sucesso!" });
-    });
-});
-
-//ver se já existe usuário com determinado user ao editar perfil
-server.get('/api/check-username/:username', (req, res) => {
-    const { username } = req.params;
-    const userId = req.query.currentUserId;
-
-    let sql = `SELECT COUNT(*) AS count FROM users WHERE username = ?`;
-    let params = [username];
-
-    if (userId) {
-        sql += ` AND id != ?`;
-        params.push(userId);
-    }
-
-    db.query(sql, params, (error, result) => {
-        if (error) {
-            console.error("Erro ao verificar o username:", error);
-            return res.status(500).send({ status: false, message: "Erro ao verificar username" });
-        }
-
-        const usernameExists = result[0].count > 0;
-        res.send({ exists: usernameExists });
-    });
-});
-
-//upload de imagens (perfil)
-server.post('/api/upload', upload.single('image'), (req, res) => {
-    if (!req.file) {
-        return res.status(400).send({ status: false, message: 'Nenhum arquivo enviado.' });
-    }
-
-    const imageUrl = `http://localhost:8085/uploads/${req.file.filename}`;
-    res.send({ status: true, url: imageUrl });
-});
-
-server.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 //view posts criados pelo usuário logado/cadastrado
 server.get("/api/posts/user/:userId", (req, res) => {
@@ -660,21 +709,7 @@ server.get("/api/posts/saved/:userId", (req, res) => {
     });
 });
 
-/*/buscar usuário por id
-server.get("/api/users/:id", (req, res) => {
-    const userId = req.params.id;
-    const sql = "SELECT * FROM users WHERE id = ?";
-    db.query(sql, [userId], function (error, result) {
-        if (error) {
-            console.error("Erro ao buscar usuário:", error);
-            res.status(500).send({ status: false, message: "Erro ao acessar a base de dados" });
-        } else if (result.length === 0) {
-            res.status(404).send({ status: false, message: "Usuário não encontrado" });
-        } else {
-            res.send({ status: true, data: result[0] });
-        }
-    });
-}); */
+//---------------TUDO EM RELAÇÃO A PESQUISA---------------//
 
 //buscar usuário por username
 server.get("/api/users/username/:username", (req, res) => {
@@ -691,3 +726,19 @@ server.get("/api/users/username/:username", (req, res) => {
         }
     });
 });
+
+/*/buscar usuário por id
+server.get("/api/users/:id", (req, res) => {
+    const userId = req.params.id;
+    const sql = "SELECT * FROM users WHERE id = ?";
+    db.query(sql, [userId], function (error, result) {
+        if (error) {
+            console.error("Erro ao buscar usuário:", error);
+            res.status(500).send({ status: false, message: "Erro ao acessar a base de dados" });
+        } else if (result.length === 0) {
+            res.status(404).send({ status: false, message: "Usuário não encontrado" });
+        } else {
+            res.send({ status: true, data: result[0] });
+        }
+    });
+}); */
