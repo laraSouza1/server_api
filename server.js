@@ -51,8 +51,18 @@ const upload = multer({ storage: storage });
 
 //view todos users
 server.get("/api/users", (req, res) => {
-    const sql = "SELECT * FROM users";
-    db.query(sql, function (error, result) {
+    const search = req.query.search || '';
+    const likeSearch = `%${search}%`;
+
+    let sql = "SELECT * FROM users";
+    let params = [];
+
+    if (search) {
+        sql += " WHERE username LIKE ? OR name LIKE ?";
+        params.push(likeSearch, likeSearch);
+    }
+
+    db.query(sql, params, function (error, result) {
         if (error) {
             console.error("Erro ao consultar a tabela 'users':", error);
             res.status(500).send({ status: false, message: "Erro ao acessar a base de dados" });
@@ -171,6 +181,7 @@ server.post('/api/posts', (req, res) => {
 server.get("/api/posts", (req, res) => {
     const userId = parseInt(req.query.userId) || 0;
     const community = req.query.community || null;
+    const search = req.query.search || '';
 
     let sql = `
         SELECT p.*,
@@ -185,10 +196,29 @@ server.get("/api/posts", (req, res) => {
     `;
 
     const params = [userId, userId];
+    const whereClauses = [];
 
     if (community) {
-        sql += ` WHERE p.community = ?`;
+        whereClauses.push(`p.community = ?`);
         params.push(community);
+    }
+
+    if (search) {
+        whereClauses.push(`
+            (p.title LIKE ? OR
+             p.content LIKE ? OR
+             u.username LIKE ? OR
+             p.community LIKE ? OR
+             EXISTS (
+                 SELECT 1 FROM post_tags pt WHERE pt.post_id = p.id AND pt.tag LIKE ?
+             ))
+        `);
+        const likeSearch = `%${search}%`;
+        params.push(likeSearch, likeSearch, likeSearch, likeSearch, likeSearch);
+    }    
+
+    if (whereClauses.length > 0) {
+        sql += ' WHERE ' + whereClauses.join(' AND ');
     }
 
     sql += ` ORDER BY p.created_at DESC`;
@@ -233,9 +263,23 @@ server.get("/api/posts", (req, res) => {
 
 //buscars todas as tags
 server.get("/api/tags", (req, res) => {
-    const sql = `SELECT DISTINCT tag FROM post_tags ORDER BY tag`;
+    const search = req.query.search || '';
+    const likeSearch = `%${search}%`;
 
-    db.query(sql, (error, result) => {
+    let sql = `
+        SELECT tag, COUNT(*) as count 
+        FROM post_tags
+    `;
+    let params = [];
+
+    if (search) {
+        sql += " WHERE tag LIKE ?";
+        params.push(likeSearch);
+    }
+
+    sql += " GROUP BY tag ORDER BY tag";
+
+    db.query(sql, params, (error, result) => {
         if (error) {
             console.error("Erro ao buscar tags:", error);
             return res.status(500).send({ status: false, message: "Erro ao buscar tags" });
@@ -287,7 +331,6 @@ server.post("/api/saved_posts", (req, res) => {
     });
 
 });
-
 
 //remove postagem salva
 server.delete("/api/saved_posts/:userId/:postId", (req, res) => {
@@ -370,8 +413,9 @@ server.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 //view posts criados pelo usuário logado/cadastrado
 server.get("/api/posts/user/:userId", (req, res) => {
     const userId = parseInt(req.params.userId);
+    const search = req.query.search || '';
 
-    const sql = `
+    let sql = `
       SELECT p.*,
         u.username,
         u.name,
@@ -382,10 +426,26 @@ server.get("/api/posts/user/:userId", (req, res) => {
       FROM posts p
       JOIN users u ON p.user_id = u.id
       WHERE p.user_id = ?
-      ORDER BY p.created_at DESC
     `;
 
-    db.query(sql, [userId, userId, userId], (error, posts) => {
+    const params = [userId, userId, userId];
+
+    if (search) {
+        sql += ` AND (
+            p.title LIKE ? OR
+            p.content LIKE ? OR
+            p.community LIKE ? OR
+            EXISTS (
+              SELECT 1 FROM post_tags pt WHERE pt.post_id = p.id AND pt.tag LIKE ?
+            )
+        )`;
+        const likeSearch = `%${search}%`;
+        params.push(likeSearch, likeSearch, likeSearch, likeSearch);
+    }
+
+    sql += ` ORDER BY p.created_at DESC`;
+
+    db.query(sql, params, (error, posts) => {
         if (error) {
             console.error("Erro ao buscar posts do usuário:", error);
             return res.status(500).send({ status: false, message: "Erro ao buscar posts do usuário" });
@@ -424,8 +484,9 @@ server.get("/api/posts/user/:userId", (req, res) => {
 //buscar posts curtidos por um usuário
 server.get("/api/posts/liked/:userId", (req, res) => {
     const userId = parseInt(req.params.userId);
+    const search = req.query.search || '';
 
-    const sql = `
+    let sql = `
       SELECT p.*,
              u.username,
              u.name,
@@ -437,10 +498,27 @@ server.get("/api/posts/liked/:userId", (req, res) => {
       JOIN likes l ON p.id = l.post_id
       JOIN users u ON p.user_id = u.id
       WHERE l.user_id = ?
-      ORDER BY p.created_at DESC
     `;
 
-    db.query(sql, [userId, userId], (error, posts) => {
+    const params = [userId, userId];
+
+    if (search) {
+        sql += ` AND (
+            p.title LIKE ? OR
+            p.content LIKE ? OR
+            p.community LIKE ? OR
+            u.username LIKE ? OR
+            EXISTS (
+                SELECT 1 FROM post_tags pt WHERE pt.post_id = p.id AND pt.tag LIKE ?
+            )
+        )`;
+        const likeSearch = `%${search}%`;
+        params.push(likeSearch, likeSearch, likeSearch, likeSearch, likeSearch);
+    }
+
+    sql += ` ORDER BY p.created_at DESC`;
+
+    db.query(sql, params, (error, posts) => {
         if (error) {
             console.error("Erro ao buscar posts curtidos:", error);
             return res.status(500).send({ status: false, message: "Erro ao buscar posts curtidos" });
@@ -477,8 +555,9 @@ server.get("/api/posts/liked/:userId", (req, res) => {
 //buscar posts salvos por um usuário
 server.get("/api/posts/saved/:userId", (req, res) => {
     const userId = parseInt(req.params.userId);
+    const search = req.query.search || '';
 
-    const sql = `
+    let sql = `
       SELECT p.*,
              u.username,
              u.name,
@@ -490,10 +569,27 @@ server.get("/api/posts/saved/:userId", (req, res) => {
       JOIN saved_posts s ON p.id = s.post_id
       JOIN users u ON p.user_id = u.id
       WHERE s.user_id = ?
-      ORDER BY p.created_at DESC
     `;
 
-    db.query(sql, [userId, userId], (error, posts) => {
+    const params = [userId, userId];
+
+    if (search) {
+        sql += ` AND (
+            p.title LIKE ? OR
+            p.content LIKE ? OR
+            p.community LIKE ? OR
+            u.username LIKE ? OR
+            EXISTS (
+                SELECT 1 FROM post_tags pt WHERE pt.post_id = p.id AND pt.tag LIKE ?
+            )
+        )`;
+        const likeSearch = `%${search}%`;
+        params.push(likeSearch, likeSearch, likeSearch, likeSearch, likeSearch);
+    }
+
+    sql += ` ORDER BY p.created_at DESC`;
+
+    db.query(sql, params, (error, posts) => {
         if (error) {
             console.error("Erro ao buscar posts salvos:", error);
             return res.status(500).send({ status: false, message: "Erro ao buscar posts salvos" });
@@ -527,11 +623,27 @@ server.get("/api/posts/saved/:userId", (req, res) => {
     });
 });
 
-//buscar usuário por id
+/*/buscar usuário por id
 server.get("/api/users/:id", (req, res) => {
     const userId = req.params.id;
     const sql = "SELECT * FROM users WHERE id = ?";
     db.query(sql, [userId], function (error, result) {
+        if (error) {
+            console.error("Erro ao buscar usuário:", error);
+            res.status(500).send({ status: false, message: "Erro ao acessar a base de dados" });
+        } else if (result.length === 0) {
+            res.status(404).send({ status: false, message: "Usuário não encontrado" });
+        } else {
+            res.send({ status: true, data: result[0] });
+        }
+    });
+}); */
+
+//buscar usuário por username
+server.get("/api/users/username/:username", (req, res) => {
+    const username = req.params.username;
+    const sql = "SELECT * FROM users WHERE username = ?";
+    db.query(sql, [username], function (error, result) {
         if (error) {
             console.error("Erro ao buscar usuário:", error);
             res.status(500).send({ status: false, message: "Erro ao acessar a base de dados" });
