@@ -203,20 +203,19 @@ server.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 //criar post
 server.post('/api/posts', (req, res) => {
-    const { user_id, title, content, community, tags, media_url } = req.body;
+    const { user_id, title, content, community, tags, media_url, is_draft } = req.body;
 
     if (!user_id || !title || !content) {
         return res.status(400).send({ status: false, message: "Campos obrigatórios ausentes" });
     }
 
     const insertPostSql = `
-        INSERT INTO posts (user_id, title, content, community, tags, media_url)
-        VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO posts (user_id, title, content, community, tags, media_url, is_draft)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
     `;
 
     const tagsAsString = tags.join(', ');
-
-    db.query(insertPostSql, [user_id, title, content, community || null, tagsAsString, media_url || null], (error, result) => {
+    db.query(insertPostSql, [user_id, title, content, community || null, tagsAsString, media_url || null, is_draft || 0], (error, result) => {
         if (error) {
             console.error("Erro ao inserir post:", error);
             return res.status(500).send({ status: false, message: "Erro ao salvar o post" });
@@ -227,17 +226,15 @@ server.post('/api/posts', (req, res) => {
         if (tags.length > 0) {
             const tagValues = tags.map(tag => [postId, tag.trim().toLowerCase()]);
             const insertTagsSql = "INSERT INTO post_tags (post_id, tag) VALUES ?";
-
             db.query(insertTagsSql, [tagValues], (tagErr) => {
                 if (tagErr) {
                     console.error("Erro ao inserir tags:", tagErr);
                     return res.status(500).send({ status: false, message: "Erro ao salvar as tags do post" });
                 }
-
-                res.send({ status: true, message: "Post e tags criados com sucesso", postId });
+                res.send({ status: true, message: "Rascunho salvo com sucesso", postId });
             });
         } else {
-            res.send({ status: true, message: "Post criado com sucesso (sem tags)", postId });
+            res.send({ status: true, message: "Rascunho salvo com sucesso (sem tags)", postId });
         }
     });
 });
@@ -283,7 +280,10 @@ server.get("/api/posts", (req, res) => {
     }
 
     if (whereClauses.length > 0) {
+        whereClauses.push('p.is_draft = 0');
         sql += ' WHERE ' + whereClauses.join(' AND ');
+    } else {
+        sql += ' WHERE p.is_draft = 0';
     }
 
     sql += ` ORDER BY p.created_at DESC`;
@@ -467,8 +467,14 @@ server.delete("/api/likes/:userId/:postId", (req, res) => {
 //adiciona postagem salva
 server.post("/api/saved_posts", (req, res) => {
     const { user_id, post_id } = req.body;
-    const sql = `INSERT INTO saved_posts (user_id, post_id) VALUES (?, ?)`;
 
+    console.log("Dados recebidos para salvar:", user_id, post_id); // ADICIONE ISSO
+
+    if (!user_id || !post_id) {
+        return res.status(400).send({ status: false, message: "Dados inválidos." });
+    }
+
+    const sql = `INSERT INTO saved_posts (user_id, post_id) VALUES (?, ?)`;
     db.query(sql, [user_id, post_id], (error) => {
         if (error) {
             console.error("Erro ao salvar postagem:", error);
@@ -476,7 +482,6 @@ server.post("/api/saved_posts", (req, res) => {
         }
         res.send({ status: true });
     });
-
 });
 
 //remove postagem salva
@@ -511,7 +516,7 @@ server.get("/api/posts/user/:userId", (req, res) => {
         (SELECT COUNT(*) FROM saved_posts s WHERE s.post_id = p.id AND s.user_id = ?) > 0 AS user_saved
       FROM posts p
       JOIN users u ON p.user_id = u.id
-      WHERE p.user_id = ?
+      WHERE p.user_id = ? AND p.is_draft = 0
     `;
 
     const params = [userId, userId, userId];
@@ -702,6 +707,75 @@ server.get("/api/posts/saved/:userId", (req, res) => {
                 tags: tagsMap[post.id] || [],
                 user_liked: post.user_liked,
                 user_saved: true
+            }));
+
+            res.send({ status: true, data: fullPosts });
+        });
+    });
+});
+
+//ver rascunhos
+server.get("/api/posts/user/:userId/drafts", (req, res) => {
+    const userId = parseInt(req.params.userId);
+    const search = req.query.search || '';
+
+    let sql = `
+      SELECT p.*,
+             u.username,
+             u.name,
+             u.profile_pic
+      FROM posts p
+      JOIN users u ON p.user_id = u.id
+      WHERE p.user_id = ? AND p.is_draft = 1
+    `;
+
+    const params = [userId];
+
+    if (search) {
+        sql += `
+        AND (
+          p.title LIKE ? OR
+          p.content LIKE ? OR
+          p.community LIKE ? OR
+          u.username LIKE ? OR
+          EXISTS (
+            SELECT 1 FROM post_tags pt WHERE pt.post_id = p.id AND pt.tag LIKE ?
+          )
+        )
+      `;
+        const likeSearch = `%${search}%`;
+        params.push(likeSearch, likeSearch, likeSearch, likeSearch, likeSearch);
+    }
+
+    sql += ` ORDER BY p.created_at DESC`;
+
+    db.query(sql, params, (error, posts) => {
+        if (error) {
+            console.error("Erro ao buscar rascunhos:", error);
+            return res.status(500).send({ status: false, message: "Erro ao buscar rascunhos" });
+        }
+
+        const postIds = posts.map(post => post.id);
+        if (postIds.length === 0) {
+            return res.send({ status: true, data: [] });
+        }
+
+        const tagSql = `SELECT * FROM post_tags WHERE post_id IN (?)`;
+        db.query(tagSql, [postIds], (tagError, tagsResult) => {
+            if (tagError) {
+                console.error("Erro ao buscar tags:", tagError);
+                return res.status(500).send({ status: false, message: "Erro ao buscar tags" });
+            }
+
+            const tagsMap = {};
+            tagsResult.forEach(tag => {
+                if (!tagsMap[tag.post_id]) tagsMap[tag.post_id] = [];
+                tagsMap[tag.post_id].push(tag.tag);
+            });
+
+            const fullPosts = posts.map(post => ({
+                ...post,
+                tags: tagsMap[post.id] || []
             }));
 
             res.send({ status: true, data: fullPosts });
