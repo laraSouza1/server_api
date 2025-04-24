@@ -366,13 +366,13 @@ server.get("/api/posts/:id", (req, res) => {
 //atualizar um post
 server.put('/api/posts/:id', (req, res) => {
     const postId = req.params.id;
-    const { title, content, community, tags } = req.body;
+    const { title, content, community, tags, is_draft } = req.body;
 
     const updateSql = `
-      UPDATE posts SET title = ?, content = ?, community = ?, tags = ? WHERE id = ?
+        UPDATE posts SET title = ?, content = ?, community = ?, tags = ?, is_draft = ? WHERE id = ?
     `;
 
-    db.query(updateSql, [title, content, community || null, tags.join(', '), postId], (err) => {
+    db.query(updateSql, [title, content, community || null, tags.join(', '), is_draft || 0, postId], (err) => {
         if (err) return res.status(500).send({ status: false, message: "Erro ao atualizar o post" });
 
         const deleteTagsSql = "DELETE FROM post_tags WHERE post_id = ?";
@@ -678,7 +678,7 @@ server.get("/api/posts/saved/:userId", (req, res) => {
         params.push(likeSearch, likeSearch, likeSearch, likeSearch, likeSearch);
     }
 
-    sql += ` ORDER BY p.created_at DESC`;
+    sql += `ORDER BY created_at DESC`;
 
     db.query(sql, params, (error, posts) => {
         if (error) {
