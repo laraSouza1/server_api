@@ -424,7 +424,7 @@ server.get("/api/tags", (req, res) => {
         params.push(likeSearch);
     }
 
-    sql += " GROUP BY tag ORDER BY tag";
+    sql += " GROUP BY tag ORDER BY count DESC";
 
     db.query(sql, params, (error, result) => {
         if (error) {
