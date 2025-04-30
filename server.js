@@ -251,6 +251,7 @@ server.get("/api/posts", (req, res) => {
             u.name,
             u.profile_pic,
             (SELECT COUNT(*) FROM likes l WHERE l.post_id = p.id) AS likes_count,
+            (SELECT COUNT(*) FROM comments c WHERE c.post_id = p.id) AS comments_count,
             (SELECT COUNT(*) FROM likes l WHERE l.user_id = ? AND l.post_id = p.id) > 0 AS user_liked,
             (SELECT COUNT(*) FROM saved_posts s WHERE s.post_id = p.id AND s.user_id = ?) > 0 AS user_saved
         FROM posts p
@@ -326,19 +327,20 @@ server.get("/api/posts", (req, res) => {
     });
 });
 
-//pegar um post por id
+//pegar um post por id (trás comentários tmb)
 server.get("/api/posts/:id", (req, res) => {
     const postId = parseInt(req.params.id);
     const userId = parseInt(req.query.userId) || 0;
 
     const sql = `
       SELECT p.*,
-        u.username,
-        u.name,
-        u.profile_pic,
-        (SELECT COUNT(*) FROM likes l WHERE l.post_id = p.id) AS likes_count,
-        (SELECT COUNT(*) FROM likes l WHERE l.user_id = ? AND l.post_id = p.id) > 0 AS user_liked,
-        (SELECT COUNT(*) FROM saved_posts s WHERE s.post_id = p.id AND s.user_id = ?) > 0 AS user_saved
+      u.username,
+      u.name,
+      u.profile_pic,
+      (SELECT COUNT(*) FROM likes l WHERE l.post_id = p.id) AS likes_count,
+      (SELECT COUNT(*) FROM comments c WHERE c.post_id = p.id) AS comments_count,
+      (SELECT COUNT(*) FROM likes l WHERE l.user_id = ? AND l.post_id = p.id) > 0 AS user_liked,
+      (SELECT COUNT(*) FROM saved_posts s WHERE s.post_id = p.id AND s.user_id = ?) > 0 AS user_saved
       FROM posts p
       JOIN users u ON p.user_id = u.id
       WHERE p.id = ?
@@ -352,14 +354,70 @@ server.get("/api/posts/:id", (req, res) => {
         const post = results[0];
 
         const tagSql = `SELECT tag FROM post_tags WHERE post_id = ?`;
+        const commentSql = `
+            SELECT c.id, c.content, c.created_at, c.user_id, c.parent_id, u.username, u.profile_pic
+            FROM comments c
+            JOIN users u ON c.user_id = u.id
+            WHERE c.post_id = ?
+            ORDER BY c.created_at ASC
+        `;
+
         db.query(tagSql, [postId], (tagErr, tagsResult) => {
             if (tagErr) {
                 return res.status(500).send({ status: false, message: "Erro ao buscar tags" });
             }
 
             const tags = tagsResult.map(t => t.tag);
-            res.send({ status: true, data: { ...post, tags } });
+
+            db.query(commentSql, [postId], (commentErr, commentsResult) => {
+                if (commentErr) {
+                    return res.status(500).send({ status: false, message: "Erro ao buscar comentários" });
+                }
+
+                res.send({ status: true, data: { ...post, tags, comments: commentsResult } });
+            });
         });
+    });
+});
+
+//adicionar comentário
+server.post("/api/comments", (req, res) => {
+    const { user_id, post_id, content, parent_id } = req.body;
+
+    const sql = `INSERT INTO comments (user_id, post_id, content, parent_id) VALUES (?, ?, ?, ?)`;
+    db.query(sql, [user_id, post_id, content, parent_id || null], (error, result) => {
+        if (error) {
+            return res.status(500).send({ status: false, message: "Erro ao inserir comentário" });
+        }
+
+        const commentId = result.insertId;
+
+        const fetchSql = `
+        SELECT c.id, c.content, c.created_at, c.user_id, c.parent_id, u.username, u.profile_pic
+        FROM comments c
+        JOIN users u ON c.user_id = u.id
+        WHERE c.id = ?
+      `;
+        db.query(fetchSql, [commentId], (fetchError, fetchResult) => {
+            if (fetchError) {
+                return res.status(500).send({ status: false, message: "Erro ao buscar comentário inserido" });
+            }
+
+            res.send({ status: true, data: fetchResult[0] });
+        });
+    });
+});
+
+//deletar comentário
+server.delete("/api/comments/:id", (req, res) => {
+    const commentId = parseInt(req.params.id);
+
+    const sql = `DELETE FROM comments WHERE id = ?`;
+    db.query(sql, [commentId], (error, result) => {
+        if (error) {
+            return res.status(500).send({ status: false, message: "Erro ao deletar comentário" });
+        }
+        res.send({ status: true, message: "Comentário deletado com sucesso" });
     });
 });
 
@@ -512,6 +570,7 @@ server.get("/api/posts/user/:userId", (req, res) => {
         u.name,
         u.profile_pic,
         (SELECT COUNT(*) FROM likes l WHERE l.post_id = p.id) AS likes_count,
+        (SELECT COUNT(*) FROM comments c WHERE c.post_id = p.id) AS comments_count,
         (SELECT COUNT(*) FROM likes l WHERE l.user_id = ? AND l.post_id = p.id) > 0 AS user_liked,
         (SELECT COUNT(*) FROM saved_posts s WHERE s.post_id = p.id AND s.user_id = ?) > 0 AS user_saved
       FROM posts p
@@ -583,6 +642,7 @@ server.get("/api/posts/liked/:userId", (req, res) => {
              u.name,
              u.profile_pic,
              (SELECT COUNT(*) FROM likes l WHERE l.post_id = p.id) AS likes_count,
+             (SELECT COUNT(*) FROM comments c WHERE c.post_id = p.id) AS comments_count,
              true AS user_liked,
              (SELECT COUNT(*) FROM saved_posts s WHERE s.post_id = p.id AND s.user_id = ?) > 0 AS user_saved
       FROM posts p
@@ -654,6 +714,7 @@ server.get("/api/posts/saved/:userId", (req, res) => {
              u.name,
              u.profile_pic,
              (SELECT COUNT(*) FROM likes l WHERE l.post_id = p.id) AS likes_count,
+             (SELECT COUNT(*) FROM comments c WHERE c.post_id = p.id) AS comments_count,
              (SELECT COUNT(*) FROM likes l WHERE l.user_id = ? AND l.post_id = p.id) > 0 AS user_liked,
              true AS user_saved
       FROM posts p
