@@ -244,6 +244,7 @@ server.get("/api/posts", (req, res) => {
     const userId = parseInt(req.query.userId) || 0;
     const community = req.query.community || null;
     const search = req.query.search || '';
+    const tag = req.query.tag || null;
 
     let sql = `
         SELECT p.*,
@@ -268,16 +269,24 @@ server.get("/api/posts", (req, res) => {
 
     if (search) {
         whereClauses.push(`
-            (p.title LIKE ? OR
-             p.content LIKE ? OR
-             u.username LIKE ? OR
-             p.community LIKE ? OR
-             EXISTS (
-                 SELECT 1 FROM post_tags pt WHERE pt.post_id = p.id AND pt.tag LIKE ?
-             ))
+          (p.title LIKE ? OR
+            p.content LIKE ? OR
+            u.username LIKE ? OR
+            p.community LIKE ? OR
+            EXISTS (
+              SELECT 1 FROM post_tags pt WHERE pt.post_id = p.id AND pt.tag LIKE ?
+            ))
         `);
         const likeSearch = `%${search}%`;
         params.push(likeSearch, likeSearch, likeSearch, likeSearch, likeSearch);
+    }
+
+    if (tag) {
+        whereClauses.push(`EXISTS (
+          SELECT 1 FROM post_tags pt
+          WHERE pt.post_id = p.id AND pt.tag = ?
+        )`);
+        params.push(tag);
     }
 
     if (whereClauses.length > 0) {
@@ -472,17 +481,19 @@ server.get("/api/tags", (req, res) => {
     const likeSearch = `%${search}%`;
 
     let sql = `
-        SELECT tag, COUNT(*) as count 
-        FROM post_tags
+      SELECT pt.tag, COUNT(*) AS count
+      FROM post_tags pt
+      JOIN posts p ON pt.post_id = p.id
+      WHERE p.is_draft = 0
     `;
     let params = [];
 
     if (search) {
-        sql += " WHERE tag LIKE ?";
+        sql += " AND pt.tag LIKE ?";
         params.push(likeSearch);
     }
 
-    sql += " GROUP BY tag ORDER BY count DESC";
+    sql += " GROUP BY pt.tag ORDER BY count DESC";
 
     db.query(sql, params, (error, result) => {
         if (error) {
