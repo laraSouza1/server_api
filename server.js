@@ -199,6 +199,83 @@ server.post('/api/upload', upload.single('image'), (req, res) => {
 
 server.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
+//verificação se segue usuário
+server.get("/api/follows/check", (req, res) => {
+    const { follower_id, following_id } = req.query;
+    const sql = "SELECT * FROM follows WHERE follower_id = ? AND following_id = ?";
+    db.query(sql, [follower_id, following_id], (err, results) => {
+        if (err) {
+            return res.status(500).json({ status: false, message: "Erro no servidor" });
+        }
+        res.json({ status: true, following: results.length > 0 });
+    });
+});
+
+//seguir usuário
+server.post("/api/follows", (req, res) => {
+    const { follower_id, following_id } = req.body;
+
+    const sql = "INSERT IGNORE INTO follows (follower_id, following_id) VALUES (?, ?)";
+    db.query(sql, [follower_id, following_id], (err, result) => {
+        if (err) {
+            return res.status(500).json({ status: false, message: "Erro ao seguir" });
+        }
+        const wasInserted = result.affectedRows > 0;
+        res.json({ status: true, message: wasInserted ? "Seguindo com sucesso" : "Já seguia" });
+    });
+});
+
+//deixar de seguir usuário
+server.delete("/api/follows", (req, res) => {
+    const { follower_id, following_id } = req.query;
+    const sql = "DELETE FROM follows WHERE follower_id = ? AND following_id = ?";
+    db.query(sql, [follower_id, following_id], (err) => {
+        if (err) {
+            return res.status(500).json({ status: false, message: "Erro ao deixar de seguir" });
+        }
+        res.json({ status: true, message: "Deixou de seguir com sucesso" });
+    });
+});
+
+//busca followings para refresh
+server.get("/api/follows/following/:userId", (req, res) => {
+    const userId = req.params.userId;
+    const sql = "SELECT following_id FROM follows WHERE follower_id = ?";
+    db.query(sql, [userId], (err, results) => {
+        if (err) return res.status(500).json({ status: false, message: "Erro" });
+        res.json({ status: true, data: results });
+    });
+});
+
+//pega todas as pessoas que o user logado segue
+server.get("/api/follows/following-users/:userId", (req, res) => {
+    const userId = req.params.userId;
+    const sql = `
+      SELECT u.id, u.username, u.name, u.profile_pic
+      FROM follows f
+      JOIN users u ON f.following_id = u.id
+      WHERE f.follower_id = ?`;
+    db.query(sql, [userId], (err, results) => {
+      if (err) return res.status(500).json({ status: false, message: "Erro" });
+      res.json({ status: true, data: results });
+    });
+  });
+
+//busca todos os seguidores do user logado
+server.get("/api/follows/followers-users/:userId", (req, res) => {
+    const userId = req.params.userId;
+    const sql = `
+      SELECT u.id, u.username, u.name, u.profile_pic
+      FROM follows f
+      JOIN users u ON f.follower_id = u.id
+      WHERE f.following_id = ?
+    `;
+    db.query(sql, [userId], (err, results) => {
+      if (err) return res.status(500).json({ status: false, message: "Erro" });
+      res.json({ status: true, data: results });
+    });
+  });
+
 //---------------TUDO EM RELAÇÃO A POSTS---------------//
 
 //criar post
@@ -860,20 +937,27 @@ server.get("/api/posts/user/:userId/drafts", (req, res) => {
 //buscar usuário por username
 server.get("/api/users/username/:username", (req, res) => {
     const username = req.params.username;
-    const sql = "SELECT * FROM users WHERE username = ?";
+    const sql = `
+      SELECT 
+        u.*,
+        (SELECT COUNT(*) FROM follows WHERE follower_id = u.id) AS followingCount,
+        (SELECT COUNT(*) FROM follows WHERE following_id = u.id) AS followersCount
+      FROM users u
+      WHERE u.username = ?
+    `;
     db.query(sql, [username], function (error, result) {
-        if (error) {
-            console.error("Erro ao buscar usuário:", error);
-            res.status(500).send({ status: false, message: "Erro ao acessar a base de dados" });
-        } else if (result.length === 0) {
-            res.status(404).send({ status: false, message: "Usuário não encontrado" });
-        } else {
-            res.send({ status: true, data: result[0] });
-        }
+      if (error) {
+        console.error("Erro ao buscar usuário:", error);
+        res.status(500).send({ status: false, message: "Erro ao acessar a base de dados" });
+      } else if (result.length === 0) {
+        res.status(404).send({ status: false, message: "Usuário não encontrado" });
+      } else {
+        res.send({ status: true, data: result[0] });
+      }
     });
-});
+  });  
 
-/*/buscar usuário por id
+//buscar usuário por id
 server.get("/api/users/:id", (req, res) => {
     const userId = req.params.id;
     const sql = "SELECT * FROM users WHERE id = ?";
@@ -887,4 +971,4 @@ server.get("/api/users/:id", (req, res) => {
             res.send({ status: true, data: result[0] });
         }
     });
-}); */
+});
