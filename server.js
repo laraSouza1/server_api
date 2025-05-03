@@ -199,6 +199,8 @@ server.post('/api/upload', upload.single('image'), (req, res) => {
 
 server.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
+//SISTEMA DE FOLLOWING E FOLLOWERS
+
 //verificação se segue usuário
 server.get("/api/follows/check", (req, res) => {
     const { follower_id, following_id } = req.query;
@@ -256,10 +258,10 @@ server.get("/api/follows/following-users/:userId", (req, res) => {
       JOIN users u ON f.following_id = u.id
       WHERE f.follower_id = ?`;
     db.query(sql, [userId], (err, results) => {
-      if (err) return res.status(500).json({ status: false, message: "Erro" });
-      res.json({ status: true, data: results });
+        if (err) return res.status(500).json({ status: false, message: "Erro" });
+        res.json({ status: true, data: results });
     });
-  });
+});
 
 //busca todos os seguidores do user logado
 server.get("/api/follows/followers-users/:userId", (req, res) => {
@@ -271,10 +273,71 @@ server.get("/api/follows/followers-users/:userId", (req, res) => {
       WHERE f.following_id = ?
     `;
     db.query(sql, [userId], (err, results) => {
-      if (err) return res.status(500).json({ status: false, message: "Erro" });
-      res.json({ status: true, data: results });
+        if (err) return res.status(500).json({ status: false, message: "Erro" });
+        res.json({ status: true, data: results });
     });
-  });
+});
+
+//retorna posts dos usuários que o user logado segue
+server.get("/api/posts/following/:userId", (req, res) => {
+    const userId = parseInt(req.params.userId);
+    const search = req.query.search || '';
+
+    const params = [userId];
+    let sql = `
+      SELECT p.*, u.username, u.name, u.profile_pic
+      FROM posts p
+      JOIN users u ON p.user_id = u.id
+      WHERE p.user_id IN (
+        SELECT following_id FROM follows WHERE follower_id = ?
+      )
+    `;
+
+    if (search) {
+        sql += `
+        AND (
+          p.title LIKE ? OR
+          p.content LIKE ? OR
+          u.username LIKE ? OR
+          EXISTS (
+            SELECT 1 FROM post_tags pt WHERE pt.post_id = p.id AND pt.tag LIKE ?
+          )
+        )
+      `;
+        const likeSearch = `%${search}%`;
+        params.push(likeSearch, likeSearch, likeSearch, likeSearch);
+    }
+
+    sql += ` ORDER BY p.created_at DESC`;
+
+    db.query(sql, params, (err, posts) => {
+        if (err) return res.status(500).json({ status: false, message: "Erro ao buscar posts" });
+
+        const postIds = posts.map(post => post.id);
+
+        if (postIds.length === 0) {
+            return res.json({ status: true, data: [] });
+        }
+
+        const tagSql = `SELECT * FROM post_tags WHERE post_id IN (?)`;
+        db.query(tagSql, [postIds], (tagErr, tagsResult) => {
+            if (tagErr) return res.status(500).json({ status: false, message: "Erro ao buscar tags" });
+
+            const tagsMap = {};
+            tagsResult.forEach(tag => {
+                if (!tagsMap[tag.post_id]) tagsMap[tag.post_id] = [];
+                tagsMap[tag.post_id].push(tag.tag);
+            });
+
+            const fullPosts = posts.map(post => ({
+                ...post,
+                tags: tagsMap[post.id] || []
+            }));
+
+            res.json({ status: true, data: fullPosts });
+        });
+    });
+});
 
 //---------------TUDO EM RELAÇÃO A POSTS---------------//
 
@@ -946,16 +1009,16 @@ server.get("/api/users/username/:username", (req, res) => {
       WHERE u.username = ?
     `;
     db.query(sql, [username], function (error, result) {
-      if (error) {
-        console.error("Erro ao buscar usuário:", error);
-        res.status(500).send({ status: false, message: "Erro ao acessar a base de dados" });
-      } else if (result.length === 0) {
-        res.status(404).send({ status: false, message: "Usuário não encontrado" });
-      } else {
-        res.send({ status: true, data: result[0] });
-      }
+        if (error) {
+            console.error("Erro ao buscar usuário:", error);
+            res.status(500).send({ status: false, message: "Erro ao acessar a base de dados" });
+        } else if (result.length === 0) {
+            res.status(404).send({ status: false, message: "Usuário não encontrado" });
+        } else {
+            res.send({ status: true, data: result[0] });
+        }
     });
-  });  
+});
 
 //buscar usuário por id
 server.get("/api/users/:id", (req, res) => {
