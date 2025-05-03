@@ -339,6 +339,38 @@ server.get("/api/posts/following/:userId", (req, res) => {
     });
 });
 
+//SISTEMA DE BLOCK E UNBLOCK
+
+//buscar usuário bloqueado por id
+server.get("/api/blocks/:userId", (req, res) => {
+    const userId = parseInt(req.params.userId);
+    const sql = "SELECT blocked_id FROM blocks WHERE blocker_id = ?";
+    db.query(sql, [userId], (err, results) => {
+        if (err) return res.status(500).send({ status: false, message: "Erro ao buscar bloqueios" });
+        res.send({ status: true, data: results });
+    });
+});
+
+//bloqueia user
+server.post("/api/blocks", (req, res) => {
+    const { blocker_id, blocked_id } = req.body;
+    const sql = "INSERT INTO blocks (blocker_id, blocked_id) VALUES (?, ?)";
+    db.query(sql, [blocker_id, blocked_id], (err) => {
+        if (err) return res.status(500).send({ status: false, message: "Erro ao bloquear" });
+        res.send({ status: true });
+    });
+});
+
+//desbloqueia user
+server.delete("/api/blocks", (req, res) => {
+    const { blocker_id, blocked_id } = req.query;
+    const sql = "DELETE FROM blocks WHERE blocker_id = ? AND blocked_id = ?";
+    db.query(sql, [blocker_id, blocked_id], (err) => {
+        if (err) return res.status(500).send({ status: false, message: "Erro ao desbloquear" });
+        res.send({ status: true });
+    });
+});
+
 //---------------TUDO EM RELAÇÃO A POSTS---------------//
 
 //criar post
