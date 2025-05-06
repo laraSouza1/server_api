@@ -55,16 +55,22 @@ const upload = multer({ storage: storage });
 server.get("/api/users", (req, res) => {
     const search = req.query.search || '';
     const likeSearch = `%${search}%`;
+    const currentUserId = parseInt(req.query.currentUserId);
 
-    let sql = "SELECT * FROM users";
-    let params = [];
+    let sql = `
+        SELECT * FROM users 
+        WHERE id != ?
+          AND id NOT IN (SELECT blocked_id FROM blocks WHERE blocker_id = ?)
+          AND id NOT IN (SELECT blocker_id FROM blocks WHERE blocked_id = ?)
+    `;
+    let params = [currentUserId, currentUserId, currentUserId];
 
     if (search) {
-        sql += " WHERE username LIKE ? OR name LIKE ?";
+        sql += " AND (username LIKE ? OR name LIKE ?)";
         params.push(likeSearch, likeSearch);
     }
 
-    db.query(sql, params, function (error, result) {
+    db.query(sql, params, (error, result) => {
         if (error) {
             console.error("Erro ao consultar a tabela 'users':", error);
             res.status(500).send({ status: false, message: "Erro ao acessar a base de dados" });
@@ -134,6 +140,30 @@ server.post('/api/register', (req, res) => {
 
             console.log("Usuário cadastrado com sucesso:", { username, name, email });
             res.send({ status: true, message: "Usuário cadastrado com sucesso" });
+        });
+    });
+});
+
+//apagar conta
+server.delete("/api/users/:id", (req, res) => {
+    const userId = parseInt(req.params.id);
+
+    const deletePosts = "DELETE FROM posts WHERE user_id = ?";
+    const deleteUser = "DELETE FROM users WHERE id = ?";
+
+    db.query(deletePosts, [userId], (err) => {
+        if (err) {
+            console.error("Erro ao deletar posts:", err);
+            return res.status(500).send({ status: false, message: "Erro ao deletar posts" });
+        }
+
+        db.query(deleteUser, [userId], (err) => {
+            if (err) {
+                console.error("Erro ao deletar usuário:", err);
+                return res.status(500).send({ status: false, message: "Erro ao deletar usuário" });
+            }
+
+            res.send({ status: true, message: "Usuário e posts deletados com sucesso" });
         });
     });
 });
@@ -368,6 +398,46 @@ server.delete("/api/blocks", (req, res) => {
     db.query(sql, [blocker_id, blocked_id], (err) => {
         if (err) return res.status(500).send({ status: false, message: "Erro ao desbloquear" });
         res.send({ status: true });
+    });
+});
+
+//vê quem bloqueou o user
+server.get("/api/blocks/blockers/:userId", (req, res) => {
+    const userId = parseInt(req.params.userId);
+    const sql = "SELECT blocker_id FROM blocks WHERE blocked_id = ?";
+    db.query(sql, [userId], (err, results) => {
+        if (err) return res.status(500).send({ status: false, message: "Erro ao buscar quem bloqueou" });
+        res.send({ status: true, data: results });
+    });
+});
+
+//detalhes users bloqueados
+server.get("/api/users/by-ids", (req, res) => {
+    const idsParam = req.query.ids;
+    const search = req.query.search || '';
+
+    if (!idsParam) return res.send({ status: true, data: [] });
+
+    const ids = idsParam.split(',').map(id => parseInt(id)).filter(id => !isNaN(id));
+    const likeSearch = `%${search}%`;
+
+    let sql = `
+      SELECT id, username, name, profile_pic FROM users
+      WHERE id IN (?)
+    `;
+    let params = [ids];
+
+    if (search) {
+        sql += " AND (username LIKE ? OR name LIKE ?)";
+        params.push(likeSearch, likeSearch);
+    }
+
+    db.query(sql, params, (err, result) => {
+        if (err) {
+            console.error("Erro ao buscar usuários por IDs:", err);
+            return res.status(500).send({ status: false, message: "Erro ao buscar usuários" });
+        }
+        res.send({ status: true, data: result });
     });
 });
 
