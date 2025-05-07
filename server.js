@@ -131,16 +131,62 @@ server.post('/api/register', (req, res) => {
             }
         }
 
-        const sql = "INSERT INTO users (username, name, email, password) VALUES (?, ?, ?, ?)";
-        db.query(sql, [username, name, email, password], (error) => {
+        const insertSql = "INSERT INTO users (username, name, email, password) VALUES (?, ?, ?, ?)";
+        db.query(insertSql, [username, name, email, password], (error, result) => {
             if (error) {
                 console.error("Erro ao inserir usuário:", error);
                 return res.status(500).send({ status: false, message: "Erro ao cadastrar usuário" });
             }
 
-            console.log("Usuário cadastrado com sucesso:", { username, name, email });
-            res.send({ status: true, message: "Usuário cadastrado com sucesso" });
+            const userId = result.insertId;
+
+            console.log("Usuário cadastrado com sucesso:", { id: userId, username, name, email });
+
+            res.send({
+                status: true,
+                message: "Usuário cadastrado com sucesso",
+                user: {
+                    id: userId,
+                    username,
+                    name,
+                    email,
+                    profile_pic: null,
+                    cover_pic: null,
+                    bio: null,
+                    created_at: new Date().toISOString()
+                }
+            });
         });
+    });
+});
+
+//verifica se já existe certo e-mail no cadastro
+server.get('/api/users/check-email', (req, res) => {
+    const { email } = req.query;
+    const sql = "SELECT 1 FROM users WHERE email = ? LIMIT 1";
+
+    db.query(sql, [email], (err, results) => {
+        if (err) {
+            console.error("Erro ao verificar email:", err);
+            return res.status(500).json({ error: "Erro interno do servidor" });
+        }
+
+        res.status(200).json({ exists: results.length > 0 });
+    });
+});
+
+//verifica se já existe certo username no cadastro
+server.get('/api/users/check-username', (req, res) => {
+    const { username } = req.query;
+    const sql = "SELECT 1 FROM users WHERE username = ? LIMIT 1";
+
+    db.query(sql, [username], (err, results) => {
+        if (err) {
+            console.error("Erro ao verificar username:", err);
+            return res.status(500).json({ error: "Erro interno do servidor" });
+        }
+
+        res.status(200).json({ exists: results.length > 0 });
     });
 });
 
