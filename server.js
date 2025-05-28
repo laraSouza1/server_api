@@ -298,7 +298,22 @@ server.post("/api/follows", (req, res) => {
         if (err) {
             return res.status(500).json({ status: false, message: "Erro ao seguir" });
         }
+
         const wasInserted = result.affectedRows > 0;
+
+        //se foi uma nova inserção (não estava seguindo antes), cria notificação
+        if (wasInserted) {
+            const notifySql = `
+        INSERT INTO notifications (receiver_id, sender_id, type)
+        VALUES (?, ?, 'follow')
+      `;
+            db.query(notifySql, [following_id, follower_id], (notifyErr) => {
+                if (notifyErr) {
+                    console.error("Erro ao criar notificação de follow:", notifyErr);
+                }
+            });
+        }
+
         res.json({ status: true, message: wasInserted ? "Seguindo com sucesso" : "Já seguia" });
     });
 });
@@ -484,6 +499,71 @@ server.get("/api/users/by-ids", (req, res) => {
             return res.status(500).send({ status: false, message: "Erro ao buscar usuários" });
         }
         res.send({ status: true, data: result });
+    });
+});
+
+//------------------------- SISTEMA DE NOTIFICAÇÕES --------------------//
+
+//notificações
+server.get('/api/notifications/:userId', (req, res) => {
+    const userId = req.params.userId;
+    const search = req.query.search || '';
+
+    let sql = `
+    SELECT n.*, u.username, u.profile_pic, p.title AS post_title
+    FROM notifications n
+    LEFT JOIN users u ON n.sender_id = u.id
+    LEFT JOIN posts p ON n.post_id = p.id
+    WHERE n.receiver_id = ?
+  `;
+
+    const params = [userId];
+
+    if (search.trim() !== '') {
+        sql += ` AND (
+      u.username LIKE ? OR
+      p.title LIKE ? OR
+      n.message LIKE ?
+    )`;
+        const like = `%${search}%`;
+        params.push(like, like, like);
+    }
+
+    sql += ` ORDER BY n.created_at DESC`;
+
+    db.query(sql, params, (err, results) => {
+        if (err) {
+            console.error('Erro no banco:', err);
+            return res.status(500).send({ status: false, message: 'Erro ao buscar notificações' });
+        }
+        res.send({ status: true, data: results });
+    });
+});
+
+//contagem de notificações
+server.get("/api/notifications/count/:userId", (req, res) => {
+    const userId = req.params.userId;
+
+    const sql = `
+    SELECT COUNT(*) AS total
+    FROM notifications
+    WHERE receiver_id = ?
+  `;
+
+    db.query(sql, [userId], (err, result) => {
+        if (err) return res.status(500).json({ status: false, message: "Erro ao contar notificações" });
+        res.json({ status: true, total: result[0].total });
+    });
+});
+
+//deletar uma notificação
+server.delete("/api/notifications/:id", (req, res) => {
+    const id = req.params.id;
+
+    const sql = "DELETE FROM notifications WHERE id = ?";
+    db.query(sql, [id], (err, result) => {
+        if (err) return res.status(500).json({ status: false, message: "Erro ao deletar notificação." });
+        res.json({ status: true, message: "Notificação excluída com sucesso." });
     });
 });
 
@@ -690,17 +770,29 @@ server.post("/api/comments", (req, res) => {
         const commentId = result.insertId;
 
         const fetchSql = `
-        SELECT c.id, c.content, c.created_at, c.user_id, c.parent_id, u.username, u.profile_pic
-        FROM comments c
-        JOIN users u ON c.user_id = u.id
-        WHERE c.id = ?
-      `;
+            SELECT c.id, c.content, c.created_at, c.user_id, c.parent_id, u.username, u.profile_pic
+            FROM comments c
+            JOIN users u ON c.user_id = u.id
+            WHERE c.id = ?
+        `;
         db.query(fetchSql, [commentId], (fetchError, fetchResult) => {
             if (fetchError) {
                 return res.status(500).send({ status: false, message: "Erro ao buscar comentário inserido" });
             }
 
-            res.send({ status: true, data: fetchResult[0] });
+            //INSERIR NOTIFICAÇÃO
+            const notifySql = `
+                INSERT INTO notifications (receiver_id, sender_id, type, post_id)
+                SELECT p.user_id, ?, 'comment', p.id FROM posts p
+                WHERE p.id = ? AND p.user_id != ?
+            `;
+            db.query(notifySql, [user_id, post_id, user_id], (notifyError) => {
+                if (notifyError) {
+                    console.error("Erro ao gerar notificação de comentário:", notifyError);
+                }
+
+                res.send({ status: true, data: fetchResult[0] });
+            });
         });
     });
 });
@@ -802,9 +894,20 @@ server.post("/api/likes", (req, res) => {
             console.error("Erro ao dar like:", error);
             return res.status(500).send({ status: false, message: "Erro ao dar like" });
         }
-        res.send({ status: true });
-    });
 
+        //inserir notificação depois que o like for inserido com sucesso
+        const notifySql = `
+            INSERT INTO notifications (receiver_id, sender_id, type, post_id)
+            SELECT p.user_id, ?, 'like', p.id FROM posts p
+            WHERE p.id = ? AND p.user_id != ?
+        `;
+        db.query(notifySql, [user_id, post_id, user_id], (notifyError) => {
+            if (notifyError) {
+                console.error("Erro ao gerar notificação de like:", notifyError);
+            }
+            res.send({ status: true });
+        });
+    });
 });
 
 //remove like
@@ -825,7 +928,7 @@ server.delete("/api/likes/:userId/:postId", (req, res) => {
 server.post("/api/saved_posts", (req, res) => {
     const { user_id, post_id } = req.body;
 
-    console.log("Dados recebidos para salvar:", user_id, post_id); // ADICIONE ISSO
+    console.log("Dados recebidos para salvar:", user_id, post_id);
 
     if (!user_id || !post_id) {
         return res.status(400).send({ status: false, message: "Dados inválidos." });
