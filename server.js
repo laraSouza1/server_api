@@ -3,6 +3,7 @@ const bodyParser = require('body-parser');
 const cors = require('cors');
 const mysql = require('mysql2');
 const bcrypt = require('bcrypt');
+const nodemailer = require('nodemailer');
 
 const server = express();
 server.use(cors());
@@ -131,7 +132,8 @@ server.post('/api/register', (req, res) => {
             }
         }
 
-        const insertSql = "INSERT INTO users (username, name, email, password) VALUES (?, ?, ?, ?)";
+        //coloca user, mas ainda n está verificado
+        const insertSql = "INSERT INTO users (username, name, email, password, is_verified) VALUES (?, ?, ?, ?, 0)";
         db.query(insertSql, [username, name, email, password], (error, result) => {
             if (error) {
                 console.error("Erro ao inserir usuário:", error);
@@ -140,22 +142,139 @@ server.post('/api/register', (req, res) => {
 
             const userId = result.insertId;
 
-            console.log("Usuário cadastrado com sucesso:", { id: userId, username, name, email });
+            console.log("Usuário pré-cadastrado com sucesso (aguardando verificação):", { id: userId, username, name, email });
 
             res.send({
                 status: true,
-                message: "Usuário cadastrado com sucesso",
-                user: {
-                    id: userId,
-                    username,
-                    name,
-                    email,
-                    profile_pic: null,
-                    cover_pic: null,
-                    bio: null,
-                    created_at: new Date().toISOString()
-                }
+                message: "Usuário pré-cadastrado com sucesso. Por favor, verifique seu e-mail.",
+                user: { id: userId, email: email }
             });
+        });
+    });
+});
+
+//-------------- sistema de verificação de e-mail -------------------------//
+
+const transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+        user: 'heralert.fl@gmail.com',
+        pass: 'pjpz rcut ompr xoyb'
+    }
+});
+
+//inicialização de cadastro
+server.post('/api/initiate-registration', (req, res) => {
+    const { username, name, email, password } = req.body;
+
+    //verifica se email ou user existe
+    const checkUserSql = "SELECT * FROM users WHERE username = ? OR email = ?";
+    db.query(checkUserSql, [username, email], (error, result) => {
+        if (error) {
+            console.error("Erro ao consultar a tabela 'users':", error);
+            return res.status(500).send({ status: false, message: "Erro ao acessar a base de dados" });
+        }
+
+        if (result.length > 0) {
+            const existingUser = result[0];
+            if (existingUser.email === email) {
+                return res.status(409).send({ status: false, field: 'email', message: "Email já cadastrado" });
+            }
+            if (existingUser.username === username) {
+                return res.status(409).send({ status: false, field: 'username', message: "Usuário já cadastrado" });
+            }
+        }
+
+        //gera codigo para verificação
+        const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
+        const expiresAt = new Date(Date.now() + 15 * 60 * 1000); //valido por 15 minutos
+
+        //envia email de verificação
+        const mailOptions = {
+            from: 'hearlert.fl@gmail.com',
+            to: email,
+            subject: 'Código de Verificação Hearlert',
+            html: `
+                <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+                    <h2>Verificação de E-mail para Heralert</h2>
+                    <p>Olá,</p>
+                    <p>Obrigada por se registrar no Heralert! Para completar o seu cadastro, por favor, utilize o seguinte código de verificação:</p>
+                    <p style="font-size: 24px; font-weight: bold; color: #FF9D9D; text-align: center; background-color: #f0f0f0; padding: 10px; border-radius: 5px;">${verificationCode}</p>
+                    <p>Este código é válido por 15 minutos.</p>
+                    <p>Se você não solicitou este código, por favor, ignore este e-mail.</p>
+                    <p>Atenciosamente,<br/>Equipe Heralert</p>
+                </div>
+            `
+        };
+
+        transporter.sendMail(mailOptions, (mailError, info) => {
+            if (mailError) {
+                console.error("Erro ao enviar e-mail de verificação:", mailError);
+                return res.status(500).send({ status: false, message: "Erro ao enviar e-mail de verificação." });
+            }
+            console.log('E-mail de verificação enviado:', info.response);
+
+            //guarda dados temporariamente para validação
+            const pendingRegistrationData = { username, name, email, password, verificationCode, expiresAt };
+            if (!global.pendingRegistrations) {
+                global.pendingRegistrations = new Map();
+            }
+            global.pendingRegistrations.set(email, pendingRegistrationData);
+
+            res.status(200).send({ status: true, message: "Código de verificação enviado com sucesso para o seu e-mail.", email: email });
+        });
+    });
+});
+
+server.post('/api/verify-email-code', (req, res) => {
+    const { email, code } = req.body;
+
+    if (!global.pendingRegistrations || !global.pendingRegistrations.has(email)) {
+        return res.status(400).send({ status: false, message: "Nenhuma tentativa de registro pendente para este e-mail." });
+    }
+
+    const pendingData = global.pendingRegistrations.get(email);
+
+    if (pendingData.verificationCode !== code) {
+        return res.status(400).send({ status: false, message: "Código inválido." });
+    }
+
+    if (new Date() > pendingData.expiresAt) {
+        global.pendingRegistrations.delete(email); //limpa dados expirados
+        return res.status(400).send({ status: false, message: "Código expirado." });
+    }
+
+    //código valido e n expirado = continua o processo
+    const { username, name, password } = pendingData;
+    const insertSql = "INSERT INTO users (username, name, email, password, is_verified) VALUES (?, ?, ?, ?, 1)"; // Set is_verified to 1
+    db.query(insertSql, [username, name, email, password], (error, result) => {
+        if (error) {
+            console.error("Erro ao inserir usuário após verificação:", error);
+            if (error.code === 'ER_DUP_ENTRY') {
+                return res.status(409).send({ status: false, message: "Usuário ou e-mail já cadastrado (conflito após verificação)." });
+            }
+            return res.status(500).send({ status: false, message: "Erro ao finalizar cadastro." });
+        }
+
+        const userId = result.insertId;
+        global.pendingRegistrations.delete(email); //remove de pendendo quando a criação for sucesso
+
+        console.log("Usuário cadastrado e verificado com sucesso:", { id: userId, username, name, email });
+
+        res.status(200).send({
+            status: true,
+            message: "Usuário cadastrado e verificado com sucesso!",
+            user: {
+                id: userId,
+                username,
+                name,
+                email,
+                profile_pic: null,
+                cover_pic: null,
+                bio: null,
+                created_at: new Date().toISOString(),
+                is_verified: true
+            }
         });
     });
 });
@@ -504,7 +623,7 @@ server.get("/api/users/by-ids", (req, res) => {
 
 //------------------------- SISTEMA DE NOTIFICAÇÕES --------------------//
 
-//notificações
+//notificações gerais
 server.get('/api/notifications/:userId', (req, res) => {
     const userId = req.params.userId;
     const search = req.query.search || '';
