@@ -81,6 +81,8 @@ server.get("/api/users", (req, res) => {
     });
 });
 
+global.passwordResetTokens = new Map();
+
 //login
 server.post('/api/login', (req, res) => {
     const { usernameOrEmail, password } = req.body;
@@ -107,6 +109,133 @@ server.post('/api/login', (req, res) => {
 
         const { password_hash, ...userData } = user;
         res.send({ status: true, data: userData });
+    });
+});
+
+//envia requisição de link para mudança de palavra-passe caso o user tenha esquecido
+server.post('/api/password-reset-request', (req, res) => {
+    const { email } = req.body;
+    console.log("Requisição de reset de senha para:", email);
+
+    //acha o user por email
+    const sql = "SELECT id, username, email FROM users WHERE email = ?";
+    db.query(sql, [email], (error, result) => {
+        if (error) {
+            console.error("Erro ao buscar usuário para reset de senha:", error);
+            return res.status(500).send({ status: false, message: "Erro ao acessar a base de dados." });
+        }
+
+        if (result.length === 0) {
+            console.log("Email não encontrado, mas enviando resposta de sucesso para evitar enumeração.");
+            return res.status(200).send({ status: true, message: "Se o e-mail estiver registrado, um link de recuperação de senha foi enviado." });
+        }
+
+        const user = result[0];
+        const token = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15); // Simple random token
+        const expiresAt = new Date(Date.now() + 60 * 60 * 1000); //token válido por 1 hora
+
+        //armazena o token com ID do usuário e expiração
+        if (!global.passwordResetTokens) {
+            global.passwordResetTokens = new Map();
+        }
+        global.passwordResetTokens.set(token, { userId: user.id, expiresAt: expiresAt });
+
+        //constrói o link para att de palavra-passe
+        const resetLink = `http://localhost:4200/change-password/${user.id}/${token}`;
+
+        const mailOptions = {
+            from: 'hearlert.fl@gmail.com',
+            to: email,
+            subject: 'Redefinição de Palavra-passe Hearlert',
+            html: `
+                <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+                    <h2>Redefinição de Palavra-passe Heralert</h2>
+                    <p>Olá ${user.name || user.username},</p>
+                    <p>Você solicitou a redefinição da sua palavra-passe. Clique no link abaixo para criar uma nova palavra-passe:</p>
+                    <p><a href="${resetLink}" style="background-color: #FF9D9D; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Redefinir Palavra-passe</a></p>
+                    <p>Este link é válido por 1 hora.</p>
+                    <p>Se você não solicitou esta redefinição, por favor, ignore este e-mail.</p>
+                    <p>Atenciosamente,<br/>Equipe Heralert</p>
+                </div>
+            `
+        };
+
+        transporter.sendMail(mailOptions, (mailError, info) => {
+            if (mailError) {
+                console.error("Erro ao enviar e-mail de redefinição de senha:", mailError);
+                return res.status(500).send({ status: false, message: "Erro ao enviar e-mail de redefinição de senha." });
+            }
+            console.log('E-mail de redefinição de senha enviado:', info.response);
+            res.status(200).send({ status: true, message: "Se o e-mail estiver registrado, um link de recuperação de senha foi enviado." });
+        });
+    });
+});
+
+
+//verifica o link de atualização de palavra-passe para ver se ainda é válido
+server.get('/api/verify-password-reset-token/:userId/:token', (req, res) => {
+    const { userId, token } = req.params;
+
+    if (!global.passwordResetTokens || !global.passwordResetTokens.has(token)) {
+        console.log("Token não encontrado:", token);
+        return res.status(400).send({ status: false, message: "Link inválido ou expirado." });
+    }
+
+    const tokenData = global.passwordResetTokens.get(token);
+
+    if (tokenData.userId !== parseInt(userId)) { //assegura que o userID é o mesmo
+        console.log("UserID no token não corresponde:", userId, tokenData.userId);
+        return res.status(400).send({ status: false, message: "Link inválido." });
+    }
+
+    if (new Date() > tokenData.expiresAt) {
+        global.passwordResetTokens.delete(token); //remove token expirado
+        console.log("Token expirado:", token);
+        return res.status(400).send({ status: false, message: "Link expirado. Por favor, solicite um novo." });
+    }
+
+    //token é válido
+    res.status(200).send({ status: true, message: "Token válido.", userId: tokenData.userId });
+});
+
+
+//att palavra-passe após reset
+server.post('/api/reset-password', (req, res) => {
+    const { userId, token, newPassword } = req.body;
+
+    if (!userId || !token || !newPassword) {
+        return res.status(400).send({ status: false, message: "Dados incompletos para redefinir a senha." });
+    }
+
+    if (!global.passwordResetTokens || !global.passwordResetTokens.has(token)) {
+        return res.status(400).send({ status: false, message: "Link inválido ou expirado." });
+    }
+
+    const tokenData = global.passwordResetTokens.get(token);
+
+    if (tokenData.userId !== parseInt(userId)) {
+        return res.status(400).send({ status: false, message: "Link inválido." });
+    }
+
+    if (new Date() > tokenData.expiresAt) {
+        global.passwordResetTokens.delete(token);
+        return res.status(400).send({ status: false, message: "Link expirado. Por favor, solicite um novo." });
+    }
+
+    const updateSql = "UPDATE users SET password = ? WHERE id = ?";
+    db.query(updateSql, [newPassword, userId], (error, result) => {
+        if (error) {
+            console.error("Erro ao atualizar senha no banco de dados:", error);
+            return res.status(500).send({ status: false, message: "Erro ao atualizar a senha." });
+        }
+
+        if (result.affectedRows === 0) {
+            return res.status(404).send({ status: false, message: "Usuário não encontrado." });
+        }
+
+        global.passwordResetTokens.delete(token); //invalida token após uso
+        console.log("Senha do usuário atualizada com sucesso para userId:", userId);
+        res.status(200).send({ status: true, message: "Palavra-passe atualizada com sucesso!" });
     });
 });
 
@@ -336,25 +465,150 @@ server.delete("/api/users/:id", (req, res) => {
 //atualizar perfil
 server.put('/api/users/:id', (req, res) => {
     const { id } = req.params;
-    const { username, name, email, bio, profile_pic_url, cover_pic_url } = req.body;
+    // REMOVE email AND password from the destructured body to enforce specific flows
+    const { username, name, bio, profile_pic_url, cover_pic_url } = req.body;
 
     const sql = `
         UPDATE users
-        SET username = ?, name = ?, email = ?, bio = ?, profile_pic = ?, cover_pic = ?
+        SET username = ?, name = ?, bio = ?, profile_pic = ?, cover_pic = ?
         WHERE id = ?
     `;
 
-    console.log("SQL:", sql);
-    console.log("Valores:", [username, name, email, bio, profile_pic_url, cover_pic_url, id]);
+    console.log("SQL (update user profile, excluding email and password):", sql);
+    console.log("Valores:", [username, name, bio, profile_pic_url, cover_pic_url, id]);
 
-    db.query(sql, [username, name, email, bio, profile_pic_url, cover_pic_url, id], (error, result) => {
+    db.query(sql, [username, name, bio, profile_pic_url, cover_pic_url, id], (error, result) => {
         if (error) {
-            console.error("Erro ao atualizar o perfil:", error);
+            console.error("Erro ao atualizar o perfil (excluindo e-mail e senha):", error);
             return res.status(500).send({ status: false, message: "Erro ao atualizar o perfil" });
         }
 
-        console.log("Resultado da query:", result);
+        console.log("Resultado da query (update user profile, excluding email and password):", result);
         res.send({ status: true, message: "Perfil atualizado com sucesso!" });
+    });
+});
+
+//sistema para verificação de email ao atualizar o perfil
+global.pendingEmailUpdates = new Map();
+
+server.post('/api/initiate-email-update-verification', (req, res) => {
+    const { userId, newEmail } = req.body;
+
+    if (!userId || !newEmail) {
+        return res.status(400).send({ status: false, message: "ID do usuário e novo e-mail são obrigatórios." });
+    }
+
+    //primeiro verifica se o novo email já está em uso
+    const checkEmailSql = "SELECT id FROM users WHERE email = ? AND id != ?";
+    db.query(checkEmailSql, [newEmail, userId], (error, result) => {
+        if (error) {
+            console.error("Erro ao verificar e-mail para atualização:", error);
+            return res.status(500).send({ status: false, message: "Erro ao acessar a base de dados." });
+        }
+
+        if (result.length > 0) {
+            return res.status(409).send({ status: false, message: "Este e-mail já está em uso por outro usuário." });
+        }
+
+        const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
+        const expiresAt = new Date(Date.now() + 15 * 60 * 1000); //código válido por 15 minutos
+
+        const mailOptions = {
+            from: 'hearlert.fl@gmail.com',
+            to: newEmail, //manda para o novo email
+            subject: 'Código de Verificação para Atualização de E-mail Hearlert',
+            html: `
+            <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+                <h2>Heralert: Verificação de E-mail</h2>
+                <p>Olá,</p>
+                <p>Você solicitou uma atualização de e-mail para sua conta Heralert. Por favor, utilize o seguinte código de verificação para confirmar o novo e-mail:</p>
+                <p style="font-size: 24px; font-weight: bold; color: #FF9D9D; text-align: center; background-color: #f0f0f0; padding: 10px; border-radius: 5px;">${verificationCode}</p>
+                <p>Este código é válido por 15 minutos.</p>
+                <p>Se você não solicitou esta alteração, por favor, ignore este e-mail.</p>
+                <p>Atenciosamente,<br/>Equipe Heralert</p>
+            </div>
+            `
+        };
+
+        transporter.sendMail(mailOptions, (mailError, info) => {
+            if (mailError) {
+                console.error("Erro ao enviar e-mail de verificação para atualização:", mailError);
+                return res.status(500).send({ status: false, message: "Erro ao enviar e-mail de verificação." });
+            }
+            console.log('E-mail de verificação para atualização enviado:', info.response);
+
+            //armazena dados de atualização pendentes por userId e newEmail para verificação
+            if (!global.pendingEmailUpdates) {
+                global.pendingEmailUpdates = new Map();
+            }
+
+            const key = `${userId}:${newEmail}`;
+            global.pendingEmailUpdates.set(key, { userId, newEmail, verificationCode, expiresAt });
+
+            res.status(200).send({ status: true, message: "Código de verificação enviado com sucesso para o novo e-mail." });
+        });
+    });
+});
+
+//para verificar email ao atualizar no perfil
+server.post('/api/complete-email-update-verification', (req, res) => {
+    const { userId, email, code } = req.body; // o email aqui será o novo email onde será enviado a mensagem
+
+    if (!userId || !email || !code) {
+        return res.status(400).send({ status: false, message: "ID do usuário, e-mail e código são obrigatórios." });
+    }
+
+    const key = `${userId}:${email}`;
+    if (!global.pendingEmailUpdates || !global.pendingEmailUpdates.has(key)) {
+        return res.status(400).send({ status: false, message: "Nenhuma tentativa de atualização de e-mail pendente para este usuário e e-mail." });
+    }
+
+    const pendingData = global.pendingEmailUpdates.get(key);
+
+    if (pendingData.verificationCode !== code) {
+        return res.status(400).send({ status: false, message: "Código inválido." });
+    }
+
+    if (new Date() > pendingData.expiresAt) {
+        global.pendingEmailUpdates.delete(key);
+        return res.status(400).send({ status: false, message: "Código expirado." });
+    }
+
+    //att o email na bd
+    const updateSql = "UPDATE users SET email = ?, is_verified = 1 WHERE id = ?";
+    db.query(updateSql, [email, userId], (error, result) => {
+        if (error) {
+            console.error("Erro ao atualizar e-mail no banco de dados:", error);
+            if (error.code === 'ER_DUP_ENTRY') {
+                return res.status(409).send({ status: false, message: "Este e-mail já está em uso." });
+            }
+            return res.status(500).send({ status: false, message: "Erro ao atualizar e-mail." });
+        }
+
+        if (result.affectedRows === 0) {
+            return res.status(404).send({ status: false, message: "Usuário não encontrado ou e-mail não foi alterado." });
+        }
+
+        global.pendingEmailUpdates.delete(key); //limpa os dados pedentes
+
+        //obtém os dados atualizados do usuário para enviar de volta ao cliente
+        const getUserSql = "SELECT id, username, name, email, profile_pic, cover_pic, bio, created_at, is_verified FROM users WHERE id = ?";
+        db.query(getUserSql, [userId], (err, userResults) => {
+            if (err) {
+                console.error("Erro ao buscar usuário após atualização de e-mail:", err);
+                return res.status(500).send({ status: false, message: "E-mail atualizado, mas houve um erro ao buscar os dados do usuário." });
+            }
+            if (userResults.length === 0) {
+                return res.status(404).send({ status: false, message: "Usuário não encontrado após atualização de e-mail." });
+            }
+
+            console.log("E-mail do usuário atualizado com sucesso:", { userId, newEmail: email });
+            res.status(200).send({
+                status: true,
+                message: "E-mail atualizado com sucesso!",
+                user: userResults[0] //Envia de volta o objeto de usuário atualizado completo
+            });
+        });
     });
 });
 
