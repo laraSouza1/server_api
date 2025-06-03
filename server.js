@@ -1659,3 +1659,85 @@ server.get("/api/users/:id", (req, res) => {
         }
     });
 });
+
+//---------------------------- SISTEMA DE MENSAGENS -----------------------------------------//
+
+//pega os users que o user logado tem chat com
+server.get("/api/chats/:userId", (req, res) => {
+    const userId = req.params.userId;
+    const sql = `
+        SELECT
+            u.id AS userId,
+            u.name AS name,
+            u.username AS username,
+            u.profile_pic AS profile_pic,
+            MAX(m.created_at) AS lastMessageTime,
+            (SELECT content FROM messages WHERE (sender_id = u.id AND receiver_id = ?) OR (sender_id = ? AND receiver_id = u.id) ORDER BY created_at DESC LIMIT 1) AS lastMessageContent
+        FROM
+            messages m
+        JOIN
+            users u ON (m.sender_id = u.id AND m.receiver_id = ?) OR (m.receiver_id = u.id AND m.sender_id = ?)
+        WHERE
+            m.sender_id = ? OR m.receiver_id = ?
+        GROUP BY
+            u.id, u.name, u.profile_pic
+        ORDER BY
+            lastMessageTime DESC;
+    `;
+    db.query(sql, [userId, userId, userId, userId, userId, userId], function (error, result) {
+        if (error) {
+            console.error("Error fetching chat users:", error);
+            res.status(500).send({ status: false, message: "Error accessing the database" });
+        } else {
+            res.send({ status: true, data: result });
+        }
+    });
+});
+
+//pega mensagens edntre dois users
+server.get("/api/messages/:user1Id/:user2Id", (req, res) => {
+    const user1Id = req.params.user1Id;
+    const user2Id = req.params.user2Id;
+    const sql = `
+        SELECT *
+        FROM messages
+        WHERE (sender_id = ? AND receiver_id = ?) OR (sender_id = ? AND receiver_id = ?)
+        ORDER BY created_at ASC;
+    `;
+    db.query(sql, [user1Id, user2Id, user2Id, user1Id], function (error, result) {
+        if (error) {
+            console.error("Error fetching messages:", error);
+            res.status(500).send({ status: false, message: "Error accessing the database" });
+        } else {
+            res.send({ status: true, data: result });
+        }
+    });
+});
+
+//nova mensagem
+server.post("/api/messages", (req, res) => {
+    const { sender_id, receiver_id, content } = req.body;
+    const sql = "INSERT INTO messages (sender_id, receiver_id, content) VALUES (?, ?, ?)";
+    db.query(sql, [sender_id, receiver_id, content], function (error, result) {
+        if (error) {
+            console.error("Error sending message:", error);
+            res.status(500).send({ status: false, message: "Error sending message" });
+        } else {
+            res.status(201).send({ status: true, message: "Message sent successfully", data: { id: result.insertId } });
+        }
+    });
+});
+
+//deleta mensagem
+server.delete("/api/messages/:id", (req, res) => {
+    const messageId = req.params.id;
+    const sql = "DELETE FROM messages WHERE id = ?";
+    db.query(sql, [messageId], function (error, result) {
+        if (error) {
+            console.error("Error deleting message:", error);
+            res.status(500).send({ status: false, message: "Error deleting message" });
+        } else {
+            res.status(200).send({ status: true, message: "Message deleted successfully" });
+        }
+    });
+});
