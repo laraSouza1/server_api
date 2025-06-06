@@ -818,10 +818,23 @@ server.get("/api/blocks/:userId", (req, res) => {
 //bloqueia user
 server.post("/api/blocks", (req, res) => {
     const { blocker_id, blocked_id } = req.body;
-    const sql = "INSERT INTO blocks (blocker_id, blocked_id) VALUES (?, ?)";
-    db.query(sql, [blocker_id, blocked_id], (err) => {
+
+    const insertBlockSql = "INSERT INTO blocks (blocker_id, blocked_id) VALUES (?, ?)";
+    db.query(insertBlockSql, [blocker_id, blocked_id], (err) => {
         if (err) return res.status(500).send({ status: false, message: "Erro ao bloquear" });
-        res.send({ status: true });
+
+        //oculta o chat nos dois sentidos
+        const insertDeletedChatsSql = `
+     INSERT IGNORE INTO deleted_chats (user_id, other_user_id)
+     VALUES (?, ?), (?, ?)
+   `;
+        db.query(insertDeletedChatsSql, [blocker_id, blocked_id, blocked_id, blocker_id], (err2) => {
+            if (err2) {
+                console.error('Erro ao ocultar chat após bloqueio:', err2);
+                return res.status(500).send({ status: false, message: "Erro ao bloquear e ocultar chat" });
+            }
+            res.send({ status: true, message: "Usuário bloqueado e chat ocultado" });
+        });
     });
 });
 
@@ -833,6 +846,13 @@ server.delete("/api/blocks", (req, res) => {
         if (err) return res.status(500).send({ status: false, message: "Erro ao desbloquear" });
         res.send({ status: true });
     });
+
+    const deleteHiddenSql = `
+      DELETE FROM deleted_chats
+      WHERE (user_id = ? AND other_user_id = ?)
+      OR (user_id = ? AND other_user_id = ?)
+    `;
+    db.query(deleteHiddenSql, [blocker_id, blocked_id, blocked_id, blocker_id]);
 });
 
 //vê quem bloqueou o user
@@ -1666,47 +1686,54 @@ server.get("/api/users/:id", (req, res) => {
 server.get("/api/chats/:userId", (req, res) => {
     const userId = req.params.userId;
     const sql = `
+    SELECT
+      u.id AS userId,
+      u.name AS name,
+      u.username AS username,
+      u.profile_pic AS profile_pic,
+      MAX(m.created_at) AS lastMessageTime,
+      (
+        SELECT sender_id
+        FROM messages
+        WHERE ((sender_id = u.id AND receiver_id = ?) OR (sender_id = ? AND receiver_id = u.id))
+        ORDER BY created_at DESC
+        LIMIT 1
+      ) AS lastMessageSenderId,
+      (
         SELECT
-          u.id AS userId,
-          u.name AS name,
-          u.username AS username,
-          u.profile_pic AS profile_pic,
-          MAX(m.created_at) AS lastMessageTime,
-          (
-            SELECT sender_id
-            FROM messages
-            WHERE ((sender_id = u.id AND receiver_id = ?) OR (sender_id = ? AND receiver_id = u.id))
-            ORDER BY created_at DESC
-            LIMIT 1
-          ) AS lastMessageSenderId,
-          (
-            SELECT
-              CASE
-                WHEN content REGEXP '\\\\.(jpeg|jpg|gif|png|webp)$' THEN '[imagem]'
-                ELSE content
-              END
-            FROM messages
-            WHERE ((sender_id = u.id AND receiver_id = ?) OR (sender_id = ? AND receiver_id = u.id))
-            ORDER BY created_at DESC
-            LIMIT 1
-          ) AS lastMessageContent
-        FROM messages m
-        JOIN users u
-          ON (m.sender_id = u.id AND m.receiver_id = ?)
-          OR (m.receiver_id = u.id AND m.sender_id = ?)
-          AND NOT EXISTS (
-              -- Exclui chats que foram marcados como deletados pelo usuário atual
-              SELECT 1 FROM deleted_chats dc
-              WHERE dc.user_id = ? AND dc.other_user_id = u.id
-            )
-        GROUP BY u.id, u.name, u.username, u.profile_pic
-        ORDER BY lastMessageTime DESC;
-    `;
-    //os parâmetros são passados para a consulta SQL
+          CASE
+            WHEN content REGEXP '\\\\.(jpeg|jpg|gif|png|webp)$' THEN '[imagem]'
+            ELSE content
+          END
+        FROM messages
+        WHERE ((sender_id = u.id AND receiver_id = ?) OR (sender_id = ? AND receiver_id = u.id))
+        ORDER BY created_at DESC
+        LIMIT 1
+      ) AS lastMessageContent
+    FROM messages m
+    JOIN users u
+      ON (m.sender_id = u.id AND m.receiver_id = ?)
+      OR (m.receiver_id = u.id AND m.sender_id = ?)
+    AND NOT EXISTS (
+      SELECT 1 FROM deleted_chats dc
+      WHERE dc.user_id = ? AND dc.other_user_id = u.id
+    )
+    AND u.id NOT IN (
+      SELECT blocked_id FROM blocks WHERE blocker_id = ?
+    )
+    AND u.id NOT IN (
+      SELECT blocker_id FROM blocks WHERE blocked_id = ?
+    )
+    GROUP BY u.id, u.name, u.username, u.profile_pic
+    ORDER BY lastMessageTime DESC;
+  `;
+
     db.query(sql, [
         userId, userId,
         userId, userId,
         userId, userId,
+        userId,
+        userId,
         userId
     ], function (error, result) {
         if (error) {
