@@ -1667,24 +1667,48 @@ server.get("/api/chats/:userId", (req, res) => {
     const userId = req.params.userId;
     const sql = `
         SELECT
-            u.id AS userId,
-            u.name AS name,
-            u.username AS username,
-            u.profile_pic AS profile_pic,
-            MAX(m.created_at) AS lastMessageTime,
-            (SELECT content FROM messages WHERE (sender_id = u.id AND receiver_id = ?) OR (sender_id = ? AND receiver_id = u.id) ORDER BY created_at DESC LIMIT 1) AS lastMessageContent
-        FROM
-            messages m
-        JOIN
-            users u ON (m.sender_id = u.id AND m.receiver_id = ?) OR (m.receiver_id = u.id AND m.sender_id = ?)
-        WHERE
-            m.sender_id = ? OR m.receiver_id = ?
-        GROUP BY
-            u.id, u.name, u.profile_pic
-        ORDER BY
-            lastMessageTime DESC;
+          u.id AS userId,
+          u.name AS name,
+          u.username AS username,
+          u.profile_pic AS profile_pic,
+          MAX(m.created_at) AS lastMessageTime,
+          (
+            SELECT sender_id
+            FROM messages
+            WHERE ((sender_id = u.id AND receiver_id = ?) OR (sender_id = ? AND receiver_id = u.id))
+            ORDER BY created_at DESC
+            LIMIT 1
+          ) AS lastMessageSenderId,
+          (
+            SELECT
+              CASE
+                WHEN content REGEXP '\\\\.(jpeg|jpg|gif|png|webp)$' THEN '[imagem]'
+                ELSE content
+              END
+            FROM messages
+            WHERE ((sender_id = u.id AND receiver_id = ?) OR (sender_id = ? AND receiver_id = u.id))
+            ORDER BY created_at DESC
+            LIMIT 1
+          ) AS lastMessageContent
+        FROM messages m
+        JOIN users u
+          ON (m.sender_id = u.id AND m.receiver_id = ?)
+          OR (m.receiver_id = u.id AND m.sender_id = ?)
+          AND NOT EXISTS (
+              -- Exclui chats que foram marcados como deletados pelo usuário atual
+              SELECT 1 FROM deleted_chats dc
+              WHERE dc.user_id = ? AND dc.other_user_id = u.id
+            )
+        GROUP BY u.id, u.name, u.username, u.profile_pic
+        ORDER BY lastMessageTime DESC;
     `;
-    db.query(sql, [userId, userId, userId, userId, userId, userId], function (error, result) {
+    //os parâmetros são passados para a consulta SQL
+    db.query(sql, [
+        userId, userId,
+        userId, userId,
+        userId, userId,
+        userId
+    ], function (error, result) {
         if (error) {
             console.error("Error fetching chat users:", error);
             res.status(500).send({ status: false, message: "Error accessing the database" });
@@ -1694,7 +1718,7 @@ server.get("/api/chats/:userId", (req, res) => {
     });
 });
 
-//pega mensagens edntre dois users
+//pega mensagens entre dois users
 server.get("/api/messages/:user1Id/:user2Id", (req, res) => {
     const user1Id = req.params.user1Id;
     const user2Id = req.params.user2Id;
@@ -1723,6 +1747,7 @@ server.post("/api/messages", (req, res) => {
             console.error("Error sending message:", error);
             res.status(500).send({ status: false, message: "Error sending message" });
         } else {
+            //retorna o ID da nova mensagem inserida
             res.status(201).send({ status: true, message: "Message sent successfully", data: { id: result.insertId } });
         }
     });
@@ -1739,5 +1764,66 @@ server.delete("/api/messages/:id", (req, res) => {
         } else {
             res.status(200).send({ status: true, message: "Message deleted successfully" });
         }
+    });
+});
+
+//marcar o chat como deletado para o user atual
+server.post("/api/deleted-chats", (req, res) => {
+    const { user_id, other_user_id } = req.body;
+
+    //verifica se o chat já foi marcado como deletado
+    const checkSql = "SELECT * FROM deleted_chats WHERE user_id = ? AND other_user_id = ?";
+    db.query(checkSql, [user_id, other_user_id], (err, result) => {
+        if (err) {
+            console.error("Error checking deleted chat:", err);
+            return res.status(500).send({ status: false, message: "Erro ao verificar chat oculto" });
+        }
+
+        //se já existe um registro, o chat já está "excluido"
+        if (result.length > 0) {
+            return res.send({ status: true, message: "Chat já está oculto para este usuário." });
+        } else {
+            //insere o registro para marcar o chat como deletado
+            const insertSql = "INSERT INTO deleted_chats (user_id, other_user_id) VALUES (?, ?)";
+            db.query(insertSql, [user_id, other_user_id], (err) => {
+                if (err) {
+                    console.error("Error inserting deleted chat:", err);
+                    return res.status(500).send({ status: false, message: "Erro ao ocultar chat" });
+                }
+                res.send({ status: true, message: "Chat ocultado com sucesso." });
+            });
+        }
+    });
+});
+
+//apagar mensagens apenas para o usuário logado em um chat específico
+server.post("/api/delete-messages-only", (req, res) => {
+    const { user_id, other_user_id } = req.body;
+    const sql = `
+        DELETE FROM messages
+        WHERE (sender_id = ? AND receiver_id = ?)
+           OR (sender_id = ? AND receiver_id = ?)
+    `;
+    db.query(sql, [user_id, other_user_id, other_user_id, user_id], (err) => {
+        if (err) {
+            console.error("Error deleting messages:", err);
+            return res.status(500).send({ status: false, message: "Erro ao apagar mensagens" });
+        }
+        res.send({ status: true, message: "Mensagens apagadas com sucesso." });
+    });
+});
+
+//para reexibir um chat que foi marcado como deletado
+server.post("/api/unhide-chat", (req, res) => {
+    const { user_id, other_user_id } = req.body;
+
+    //remove o registro de chat deletado
+    const deleteSql = "DELETE FROM deleted_chats WHERE user_id = ? AND other_user_id = ?";
+    db.query(deleteSql, [user_id, other_user_id], (err, result) => {
+        if (err) {
+            console.error(err);
+            return res.status(500).send({ status: false, message: "Erro ao restaurar chat" });
+        }
+        res.send({ status: true, message: "Chat restaurado com sucesso" });
     });
 });
