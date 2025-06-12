@@ -57,27 +57,51 @@ server.get("/api/users", (req, res) => {
     const search = req.query.search || '';
     const likeSearch = `%${search}%`;
     const currentUserId = parseInt(req.query.currentUserId);
+    const limit = parseInt(req.query.limit) || 10;
+    const offset = parseInt(req.query.offset) || 0;
 
-    let sql = `
-        SELECT * FROM users 
-        WHERE id != ?
-          AND id NOT IN (SELECT blocked_id FROM blocks WHERE blocker_id = ?)
-          AND id NOT IN (SELECT blocker_id FROM blocks WHERE blocked_id = ?)
+    let baseSql = `
+    FROM users
+    WHERE 1=1 `; //adicionado 1=1 para ter sempre uma condição verdadeira e permitir adicionar mais `AND`
+    let params = [];
+
+    if (currentUserId) { //só aplica se tivermos um currentUserId válido
+        baseSql += `
+      AND id NOT IN (SELECT blocked_id FROM blocks WHERE blocker_id = ?)
+      AND id NOT IN (SELECT blocker_id FROM blocks WHERE blocked_id = ?)
     `;
-    let params = [currentUserId, currentUserId, currentUserId];
+        params.push(currentUserId, currentUserId);
+    }
 
     if (search) {
-        sql += " AND (username LIKE ? OR name LIKE ?)";
+        baseSql += " AND (username LIKE ? OR name LIKE ?)";
         params.push(likeSearch, likeSearch);
     }
 
-    db.query(sql, params, (error, result) => {
-        if (error) {
-            console.error("Erro ao consultar a tabela 'users':", error);
-            res.status(500).send({ status: false, message: "Erro ao acessar a base de dados" });
-        } else {
-            res.send({ status: true, data: result });
+    //cláusula ORDER BY para ordenar por cargo
+    const usersSql = `SELECT * ${baseSql} ORDER BY role DESC, name ASC LIMIT ? OFFSET ?`;
+    const countSql = `SELECT COUNT(*) as total ${baseSql}`;
+
+    db.query(countSql, params, (errCount, countResult) => {
+        if (errCount) {
+            console.error(errCount);
+            return res.status(500).send({ status: false, message: "Erro ao contar utilizadores." });
         }
+
+        db.query(usersSql, [...params, limit, offset], (errUsers, userResult) => {
+            if (errUsers) {
+                console.error(errUsers);
+                return res.status(500).send({ status: false, message: "Erro ao buscar utilizadores." });
+            }
+
+            res.send({
+                status: true,
+                data: {
+                    users: userResult,
+                    total: countResult[0].total
+                }
+            });
+        });
     });
 });
 
@@ -126,12 +150,11 @@ server.post('/api/password-reset-request', (req, res) => {
         }
 
         if (result.length === 0) {
-            console.log("Email não encontrado, mas enviando resposta de sucesso para evitar enumeração.");
-            return res.status(200).send({ status: true, message: "Se o e-mail estiver registrado, um link de recuperação de senha foi enviado." });
+            return res.status(200).send({ status: true });
         }
 
         const user = result[0];
-        const token = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15); // Simple random token
+        const token = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15); //token aleatório
         const expiresAt = new Date(Date.now() + 60 * 60 * 1000); //token válido por 1 hora
 
         //armazena o token com ID do usuário e expiração
@@ -162,11 +185,11 @@ server.post('/api/password-reset-request', (req, res) => {
 
         transporter.sendMail(mailOptions, (mailError, info) => {
             if (mailError) {
-                console.error("Erro ao enviar e-mail de redefinição de senha:", mailError);
-                return res.status(500).send({ status: false, message: "Erro ao enviar e-mail de redefinição de senha." });
+                console.error("Erro ao enviar e-mail para redefinir senha:", mailError);
+                return res.status(500).send({ status: false });
             }
-            console.log('E-mail de redefinição de senha enviado:', info.response);
-            res.status(200).send({ status: true, message: "Se o e-mail estiver registrado, um link de recuperação de senha foi enviado." });
+            console.log('E-mail para redefinir senha enviado:', info.response);
+            res.status(200).send({ status: true });
         });
     });
 });
@@ -177,21 +200,21 @@ server.get('/api/verify-password-reset-token/:userId/:token', (req, res) => {
     const { userId, token } = req.params;
 
     if (!global.passwordResetTokens || !global.passwordResetTokens.has(token)) {
-        console.log("Token não encontrado:", token);
-        return res.status(400).send({ status: false, message: "Link inválido ou expirado." });
+        console.log("Token não encontrado (link inválido ou expirado):", token);
+        return res.status(400).send({ status: false });
     }
 
     const tokenData = global.passwordResetTokens.get(token);
 
     if (tokenData.userId !== parseInt(userId)) { //assegura que o userID é o mesmo
-        console.log("UserID no token não corresponde:", userId, tokenData.userId);
-        return res.status(400).send({ status: false, message: "Link inválido." });
+        console.log("UserID no token não corresponde (link inválido):", userId, tokenData.userId);
+        return res.status(400).send({ status: false });
     }
 
     if (new Date() > tokenData.expiresAt) {
         global.passwordResetTokens.delete(token); //remove token expirado
-        console.log("Token expirado:", token);
-        return res.status(400).send({ status: false, message: "Link expirado. Por favor, solicite um novo." });
+        console.log("Token expirado (link expirado):", token);
+        return res.status(400).send({ status: false });
     }
 
     //token é válido
@@ -214,19 +237,19 @@ server.post('/api/reset-password', (req, res) => {
     const tokenData = global.passwordResetTokens.get(token);
 
     if (tokenData.userId !== parseInt(userId)) {
-        return res.status(400).send({ status: false, message: "Link inválido." });
+        return res.status(400).send({ status: false });
     }
 
     if (new Date() > tokenData.expiresAt) {
         global.passwordResetTokens.delete(token);
-        return res.status(400).send({ status: false, message: "Link expirado. Por favor, solicite um novo." });
+        return res.status(400).send({ status: false });
     }
 
     const updateSql = "UPDATE users SET password = ? WHERE id = ?";
     db.query(updateSql, [newPassword, userId], (error, result) => {
         if (error) {
-            console.error("Erro ao atualizar senha no banco de dados:", error);
-            return res.status(500).send({ status: false, message: "Erro ao atualizar a senha." });
+            console.error("Erro ao atualizar senha na bd:", error);
+            return res.status(500).send({ status: false });
         }
 
         if (result.affectedRows === 0) {
@@ -234,8 +257,8 @@ server.post('/api/reset-password', (req, res) => {
         }
 
         global.passwordResetTokens.delete(token); //invalida token após uso
-        console.log("Senha do usuário atualizada com sucesso para userId:", userId);
-        res.status(200).send({ status: true, message: "Palavra-passe atualizada com sucesso!" });
+        console.log("Senha do usuário atualizada com sucesso", userId);
+        res.status(200).send({ status: true });
     });
 });
 
@@ -247,8 +270,8 @@ server.post('/api/register', (req, res) => {
     const checkUserSql = "SELECT * FROM users WHERE username = ? OR email = ?";
     db.query(checkUserSql, [username, email], (error, result) => {
         if (error) {
-            console.error("Erro ao consultar a tabela 'users':", error);
-            return res.status(500).send({ status: false, message: "Erro ao acessar a base de dados" });
+            console.error("Erro ao consultar a tabela users:", error);
+            return res.status(500).send({ status: false });
         }
 
         if (result.length > 0) {
@@ -266,7 +289,7 @@ server.post('/api/register', (req, res) => {
         db.query(insertSql, [username, name, email, password], (error, result) => {
             if (error) {
                 console.error("Erro ao inserir usuário:", error);
-                return res.status(500).send({ status: false, message: "Erro ao cadastrar usuário" });
+                return res.status(500).send({ status: false });
             }
 
             const userId = result.insertId;
@@ -300,7 +323,7 @@ server.post('/api/initiate-registration', (req, res) => {
     const checkUserSql = "SELECT * FROM users WHERE username = ? OR email = ?";
     db.query(checkUserSql, [username, email], (error, result) => {
         if (error) {
-            console.error("Erro ao consultar a tabela 'users':", error);
+            console.error("Erro ao consultar a tabela users:", error);
             return res.status(500).send({ status: false, message: "Erro ao acessar a base de dados" });
         }
 
@@ -552,7 +575,7 @@ server.post('/api/initiate-email-update-verification', (req, res) => {
 
 //para verificar email ao atualizar no perfil
 server.post('/api/complete-email-update-verification', (req, res) => {
-    const { userId, email, code } = req.body; // o email aqui será o novo email onde será enviado a mensagem
+    const { userId, email, code } = req.body; //o email será o novo email onde será enviado a mensagem
 
     if (!userId || !email || !code) {
         return res.status(400).send({ status: false, message: "ID do usuário, e-mail e código são obrigatórios." });
@@ -1251,29 +1274,78 @@ server.delete('/api/posts/:id', (req, res) => {
 //buscars todas as tags
 server.get("/api/tags", (req, res) => {
     const search = req.query.search || '';
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 9;
+    const offset = (page - 1) * limit;
+
     const likeSearch = `%${search}%`;
 
-    let sql = `
-      SELECT pt.tag, COUNT(*) AS count
+    let baseSql = `
       FROM post_tags pt
       JOIN posts p ON pt.post_id = p.id
       WHERE p.is_draft = 0
     `;
+    let countSql = `SELECT COUNT(DISTINCT pt.tag) AS total ${baseSql}`;
+    let dataSql = `
+      SELECT pt.tag, COUNT(*) AS count
+      ${baseSql}
+    `;
     let params = [];
+    let countParams = [];
 
     if (search) {
-        sql += " AND pt.tag LIKE ?";
+        baseSql += " AND pt.tag LIKE ?";
+        dataSql += " AND pt.tag LIKE ?";
+        countSql += " AND pt.tag LIKE ?";
         params.push(likeSearch);
+        countParams.push(likeSearch);
     }
 
-    sql += " GROUP BY pt.tag ORDER BY count DESC";
+    dataSql += " GROUP BY pt.tag ORDER BY count DESC";
 
-    db.query(sql, params, (error, result) => {
+    dataSql += ` LIMIT ? OFFSET ?`;
+    params.push(limit, offset);
+
+    db.query(countSql, countParams, (error, countResult) => {
         if (error) {
-            console.error("Erro ao buscar tags:", error);
-            return res.status(500).send({ status: false, message: "Erro ao buscar tags" });
+            console.error("Erro ao buscar total de tags:", error);
+            return res.status(500).send({ status: false, message: "Erro ao buscar total de tags" });
         }
-        res.send({ status: true, data: result });
+
+        const totalTags = countResult[0].total;
+
+        db.query(dataSql, params, (error, result) => {
+            if (error) {
+                console.error("Erro ao buscar tags:", error);
+                return res.status(500).send({ status: false, message: "Erro ao buscar tags" });
+            }
+
+            res.send({
+                status: true,
+                data: result,
+                total: totalTags
+            });
+        });
+    });
+});
+
+//deletar tag
+server.delete("/api/tags/:tag", (req, res) => {
+    const tagToDelete = req.params.tag;
+
+    const sql = `DELETE FROM post_tags WHERE tag = ?`;
+
+    db.query(sql, [tagToDelete], (error, result) => {
+        if (error) {
+            console.error("Erro ao deletar tag:", error);
+            return res.status(500).send({ status: false, message: "Erro interno do servidor ao deletar tag." });
+        }
+
+        if (result.affectedRows === 0) {
+            return res.status(404).send({ status: false });
+        }
+
+        res.send({ status: true });
     });
 });
 
