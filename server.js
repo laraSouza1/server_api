@@ -59,38 +59,77 @@ server.get("/api/users", (req, res) => {
     const currentUserId = parseInt(req.query.currentUserId);
     const limit = parseInt(req.query.limit) || 10;
     const offset = parseInt(req.query.offset) || 0;
+    const sortByFollows = req.query.sortByFollows === 'true'; //sortby da lista por pessoas que o user logado segue
 
-    let baseSql = `
-    FROM users
-    WHERE 1=1 `; //adicionado 1=1 para ter sempre uma condição verdadeira e permitir adicionar mais `AND`
-    let params = [];
-
-    if (currentUserId) { //só aplica se tivermos um currentUserId válido
-        baseSql += `
-      AND id NOT IN (SELECT blocked_id FROM blocks WHERE blocker_id = ?)
-      AND id NOT IN (SELECT blocker_id FROM blocks WHERE blocked_id = ?)
+    let selectClause = `SELECT u.*, COALESCE(r.reports_count, 0) as reports_count`;
+    let fromClause = `
+        FROM users u
+        LEFT JOIN (
+            SELECT reported_user_id, COUNT(*) as reports_count
+            FROM reports
+            GROUP BY reported_user_id
+        ) r ON u.id = r.reported_user_id
     `;
-        params.push(currentUserId, currentUserId);
+    let whereClause = ` WHERE 1=1 `;
+    let queryParams = [];
+
+    let orderByClause;
+
+    if (sortByFollows) {
+        orderByClause = `
+            ORDER BY
+                CASE WHEN f.following_id IS NOT NULL THEN 0 ELSE 1 END ASC,
+                u.role DESC,
+                u.name ASC
+        `;
+    } else {
+        orderByClause = `
+            ORDER BY
+                u.role DESC,
+                CASE
+                    WHEN u.role = 0 THEN COALESCE(r.reports_count, 0)
+                    ELSE NULL
+                END DESC,
+                u.name ASC
+        `;
+    }
+
+    if (sortByFollows) {
+        fromClause += `
+            LEFT JOIN follows f ON u.id = f.following_id AND f.follower_id = ?
+        `;
+        queryParams.push(currentUserId);
+
+        whereClause += ` AND u.id != ? `;
+        queryParams.push(currentUserId);
+
+        if (currentUserId) {
+            whereClause += `
+                AND u.id NOT IN (SELECT blocked_id FROM blocks WHERE blocker_id = ?)
+                AND u.id NOT IN (SELECT blocker_id FROM blocks WHERE blocked_id = ?)
+            `;
+            queryParams.push(currentUserId, currentUserId);
+        }
     }
 
     if (search) {
-        baseSql += " AND (username LIKE ? OR name LIKE ?)";
-        params.push(likeSearch, likeSearch);
+        whereClause += " AND (u.username LIKE ? OR u.name LIKE ?)";
+        queryParams.push(likeSearch, likeSearch);
     }
 
-    //cláusula ORDER BY para ordenar por cargo
-    const usersSql = `SELECT * ${baseSql} ORDER BY role DESC, name ASC LIMIT ? OFFSET ?`;
-    const countSql = `SELECT COUNT(*) as total ${baseSql}`;
-
-    db.query(countSql, params, (errCount, countResult) => {
+    const countSql = `SELECT COUNT(u.id) as total ${fromClause} ${whereClause}`;
+    db.query(countSql, queryParams, (errCount, countResult) => {
         if (errCount) {
-            console.error(errCount);
+            console.error('Erro ao contar usuários:', errCount);
             return res.status(500).send({ status: false, message: "Erro ao contar utilizadores." });
         }
 
-        db.query(usersSql, [...params, limit, offset], (errUsers, userResult) => {
+        const usersSql = `${selectClause} ${fromClause} ${whereClause} ${orderByClause} LIMIT ? OFFSET ?`;
+        let usersParams = [...queryParams, limit, offset];
+
+        db.query(usersSql, usersParams, (errUsers, userResult) => {
             if (errUsers) {
-                console.error(errUsers);
+                console.error('Erro ao buscar usuários:', errUsers);
                 return res.status(500).send({ status: false, message: "Erro ao buscar utilizadores." });
             }
 
@@ -1925,4 +1964,34 @@ server.post("/api/unhide-chat", (req, res) => {
         }
         res.send({ status: true, message: "Chat restaurado com sucesso" });
     });
+});
+
+//para fazer uma denùncia
+server.post("/api/reports", (req, res) => {
+  const { reporter_id, reported_user_id, target_type, target_id, reason } = req.body;
+
+  if (!reporter_id || !reported_user_id || !target_type || !target_id || !reason) {
+    return res.status(400).send({ status: false, message: "Dados da denúncia incompletos." });
+  }
+
+  //validação para target_type
+  const allowedTargetTypes = ['user', 'post', 'comment'];
+  if (!allowedTargetTypes.includes(target_type)) {
+    return res.status(400).send({ status: false, message: "Tipo de alvo de denúncia inválido." });
+  }
+
+  const sql = `
+    INSERT INTO reports (reporter_id, reported_user_id, target_type, target_id, reason)
+    VALUES (?, ?, ?, ?, ?)
+  `;
+
+  console.log("Recebido:", { reporter_id, reported_user_id, target_type, target_id, reason });
+
+  db.query(sql, [reporter_id, reported_user_id, target_type, target_id, reason], (error, results) => {
+    if (error) {
+      console.error("Erro ao registrar denúncia:", error);
+      return res.status(500).send({ status: false, message: "Erro interno ao registrar denúncia." });
+    }
+    res.status(201).send({ status: true, message: "Denúncia registrada com sucesso!", reportId: results.insertId });
+  });
 });
