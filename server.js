@@ -961,38 +961,42 @@ server.get("/api/users/by-ids", (req, res) => {
 
 //notificações gerais
 server.get('/api/notifications/:userId', (req, res) => {
-    const userId = req.params.userId;
-    const search = req.query.search || '';
+  const userId = req.params.userId;
+  const search = req.query.search || '';
 
-    let sql = `
-    SELECT n.*, u.username, u.profile_pic, p.title AS post_title
+  let sql = `
+    SELECT
+      n.*,
+      u.username,
+      u.profile_pic,
+      COALESCE(n.post_title, p.title) AS post_title
     FROM notifications n
     LEFT JOIN users u ON n.sender_id = u.id
     LEFT JOIN posts p ON n.post_id = p.id
     WHERE n.receiver_id = ?
   `;
 
-    const params = [userId];
+  const params = [userId];
 
-    if (search.trim() !== '') {
-        sql += ` AND (
+  if (search.trim() !== '') {
+    sql += ` AND (
       u.username LIKE ? OR
-      p.title LIKE ? OR
-      n.message LIKE ?
+      COALESCE(n.message, '') LIKE ? OR
+      COALESCE(n.post_title, p.title) LIKE ?
     )`;
-        const like = `%${search}%`;
-        params.push(like, like, like);
+    const like = `%${search}%`;
+    params.push(like, like, like);
+  }
+
+  sql += ` ORDER BY n.created_at DESC`;
+
+  db.query(sql, params, (err, results) => {
+    if (err) {
+      console.error('Erro no banco:', err);
+      return res.status(500).send({ status: false, message: 'Erro ao buscar notificações' });
     }
-
-    sql += ` ORDER BY n.created_at DESC`;
-
-    db.query(sql, params, (err, results) => {
-        if (err) {
-            console.error('Erro no banco:', err);
-            return res.status(500).send({ status: false, message: 'Erro ao buscar notificações' });
-        }
-        res.send({ status: true, data: results });
-    });
+    res.send({ status: true, data: results });
+  });
 });
 
 //contagem de notificações
@@ -1294,20 +1298,63 @@ server.put('/api/posts/:id', (req, res) => {
 
 //deletar um post
 server.delete('/api/posts/:id', (req, res) => {
-    const postId = req.params.id;
+  const postId = req.params.id;
+  let postOwnerId = null;
+  let postTitle = null;
+
+  const getPostDetailsSql = "SELECT user_id, title FROM posts WHERE id = ?";
+  db.query(getPostDetailsSql, [postId], (err, postResults) => {
+    if (err) {
+      console.error("Erro ao buscar detalhes do post para notificação:", err);
+      return res.status(500).send({ status: false, message: "Erro ao buscar detalhes do post." });
+    }
+    if (postResults.length === 0) {
+      return res.status(404).send({ status: false, message: "Postagem não encontrada." });
+    }
+
+    postOwnerId = postResults[0].user_id;
+    postTitle = postResults[0].title;
 
     const deleteTagsSql = "DELETE FROM post_tags WHERE post_id = ?";
+    const deleteReportsSql = "DELETE FROM reports WHERE target_type = 'post' AND target_id = ?";
     const deletePostSql = "DELETE FROM posts WHERE id = ?";
 
     db.query(deleteTagsSql, [postId], (err) => {
-        if (err) return res.status(500).send({ status: false, message: "Erro ao remover tags do post" });
+      if (err) {
+        console.error("Erro ao remover tags do post:", err);
+        return res.status(500).send({ status: false, message: "Erro ao remover tags do post" });
+      }
+
+      db.query(deleteReportsSql, [postId], (err1) => {
+        if (err1) {
+          console.error("Erro ao remover denúncias do post:", err1);
+          return res.status(500).send({ status: false, message: "Erro ao remover denúncias do post" });
+        }
 
         db.query(deletePostSql, [postId], (err2) => {
-            if (err2) return res.status(500).send({ status: false, message: "Erro ao deletar post" });
+          if (err2) {
+            console.error("Erro ao deletar post:", err2);
+            return res.status(500).send({ status: false, message: "Erro ao deletar post" });
+          }
 
-            res.send({ status: true, message: "Post deletado com sucesso" });
+          const notificationType = 'post_deleted_admin';
+          const notificationMessage = 'Recebemos uma denúncia da sua postagem que se conferiu verdadeira, logo, ela foi excluída.';
+          const insertNotificationSql = `
+            INSERT INTO notifications (receiver_id, sender_id, type, post_id, post_title, message)
+            VALUES (?, ?, ?, ?, ?, ?)
+          `;
+          const adminSenderId = 0;
+
+          db.query(insertNotificationSql, [postOwnerId, adminSenderId, notificationType, postId, postTitle, notificationMessage], (notifErr) => {
+            if (notifErr) {
+              console.error("Erro ao criar notificação de postagem excluída para o dono:", notifErr);
+            }
+            res.send({ status: true, message: "Postagem e denúncias associadas deletadas com sucesso! Notificação enviada ao usuário." });
+          });
         });
+      });
     });
+  });
 });
 
 //buscars todas as tags
@@ -1966,32 +2013,195 @@ server.post("/api/unhide-chat", (req, res) => {
     });
 });
 
+//------------------------------- SISTEMA DE DENÚNCIAS -----------------------------------------------
+
 //para fazer uma denùncia
 server.post("/api/reports", (req, res) => {
-  const { reporter_id, reported_user_id, target_type, target_id, reason } = req.body;
+    const { reporter_id, reported_user_id, target_type, target_id, reason } = req.body;
 
-  if (!reporter_id || !reported_user_id || !target_type || !target_id || !reason) {
-    return res.status(400).send({ status: false, message: "Dados da denúncia incompletos." });
-  }
+    if (!reporter_id || !reported_user_id || !target_type || !target_id || !reason) {
+        return res.status(400).send({ status: false, message: "Dados da denúncia incompletos." });
+    }
 
-  //validação para target_type
-  const allowedTargetTypes = ['user', 'post', 'comment'];
-  if (!allowedTargetTypes.includes(target_type)) {
-    return res.status(400).send({ status: false, message: "Tipo de alvo de denúncia inválido." });
-  }
+    //validação para target_type
+    const allowedTargetTypes = ['user', 'post', 'comment'];
+    if (!allowedTargetTypes.includes(target_type)) {
+        return res.status(400).send({ status: false, message: "Tipo de alvo de denúncia inválido." });
+    }
 
-  const sql = `
+    const sql = `
     INSERT INTO reports (reporter_id, reported_user_id, target_type, target_id, reason)
     VALUES (?, ?, ?, ?, ?)
   `;
 
-  console.log("Recebido:", { reporter_id, reported_user_id, target_type, target_id, reason });
+    console.log("Recebido:", { reporter_id, reported_user_id, target_type, target_id, reason });
 
-  db.query(sql, [reporter_id, reported_user_id, target_type, target_id, reason], (error, results) => {
+    db.query(sql, [reporter_id, reported_user_id, target_type, target_id, reason], (error, results) => {
+        if (error) {
+            console.error("Erro ao registrar denúncia:", error);
+            return res.status(500).send({ status: false, message: "Erro interno ao registrar denúncia." });
+        }
+        res.status(201).send({ status: true, message: "Denúncia registrada com sucesso!", reportId: results.insertId });
+    });
+});
+
+//para deletar uma denúncia
+server.delete("/api/reports/:id", (req, res) => {
+  const reportId = req.params.id;
+
+  if (!reportId) {
+    return res.status(400).send({ status: false, message: "ID da denúncia não fornecido." });
+  }
+
+  const sql = `DELETE FROM reports WHERE id = ?`;
+
+  db.query(sql, [reportId], (error, results) => {
     if (error) {
-      console.error("Erro ao registrar denúncia:", error);
-      return res.status(500).send({ status: false, message: "Erro interno ao registrar denúncia." });
+      console.error("Erro ao deletar denúncia:", error);
+      return res.status(500).send({ status: false, message: "Erro interno ao deletar denúncia." });
     }
-    res.status(201).send({ status: true, message: "Denúncia registrada com sucesso!", reportId: results.insertId });
+
+    if (results.affectedRows === 0) {
+      return res.status(404).send({ status: false, message: "Denúncia não encontrada." });
+    }
+
+    res.status(200).send({ status: true, message: "Denúncia deletada com sucesso!" });
+  });
+});
+
+//para buscar reports
+server.get("/api/reports", (req, res) => {
+    const { search, status, limit, offset } = req.query;
+
+    let baseSql = `
+        SELECT
+        r.id AS report_id,
+        r.created_at AS report_created_at,
+        r.reason AS report_reason,
+        r.status AS report_status,
+        r.status_reason_text AS status_reason_text,
+        rep_u.username AS reporter_username,
+        rep_u.name AS reporter_name,
+        reported_u.username AS reported_username,
+        reported_u.name AS reported_name,
+        p.title AS post_title,
+        p.community AS post_community,
+        p.id AS post_id
+        FROM heralert.reports r
+        JOIN users rep_u ON r.reporter_id = rep_u.id
+        JOIN users reported_u ON r.reported_user_id = reported_u.id
+        LEFT JOIN posts p ON r.target_type = 'post' AND r.target_id = p.id
+    `;
+
+    const conditions = ["r.target_type = 'post'"];
+    const params = [];
+
+    if (status) {
+        conditions.push("r.status = ?");
+        params.push(status);
+    }
+
+    if (search) {
+        conditions.push("(p.title LIKE ? OR rep_u.username LIKE ? OR reported_u.username LIKE ?)");
+        params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+    }
+
+    if (conditions.length > 0) {
+        baseSql += " WHERE " + conditions.join(" AND ");
+    }
+
+    const countSql = `SELECT COUNT(*) AS total FROM (${baseSql}) AS subquery`;
+
+    const paginatedSql = `${baseSql} ORDER BY r.created_at DESC LIMIT ? OFFSET ?`;
+    const paginatedParams = [...params, parseInt(limit), parseInt(offset)];
+
+    db.query(countSql, params, (countError, countResults) => {
+        if (countError) {
+            return res.status(500).send({ status: false, message: "Erro interno ao buscar denúncias." });
+        }
+        const totalReports = countResults[0].total;
+
+        db.query(paginatedSql, paginatedParams, (error, results) => {
+            if (error) {
+                return res.status(500).send({ status: false, message: "Erro interno ao buscar denúncias." });
+            }
+            res.send({ status: true, data: { reports: results, total: totalReports } });
+        });
+    });
+});
+
+server.put("/api/reports/:id/status", (req, res) => {
+  const reportId = req.params.id;
+  const { status, reason } = req.body;
+
+  if (!status) {
+    return res.status(400).send({ status: false, message: "Status é obrigatório." });
+  }
+
+  if ((status === 'nao_justificado' || status === 'justificado') && !reason) {
+    return res.status(400).send({ status: false, message: "O motivo do estado é obrigatório para este status." });
+  }
+
+  const getReportDetailsSql = `
+    SELECT
+      r.reporter_id,
+      r.target_id AS post_id,
+      p.title AS post_title
+    FROM heralert.reports r
+    LEFT JOIN posts p ON r.target_type = 'post' AND r.target_id = p.id
+    WHERE r.id = ?
+  `;
+
+  db.query(getReportDetailsSql, [reportId], (err, reportDetails) => {
+    if (err) {
+      console.error("Erro ao buscar detalhes da denúncia:", err);
+      return res.status(500).send({ status: false, message: "Erro interno ao buscar detalhes da denúncia." });
+    }
+    if (reportDetails.length === 0) {
+      return res.status(404).send({ status: false, message: "Denúncia não encontrada." });
+    }
+
+    const reporterId = reportDetails[0].reporter_id;
+    const postId = reportDetails[0].post_id;
+    const postTitle = reportDetails[0].post_title;
+
+    const sql = `
+      UPDATE heralert.reports
+      SET status = ?, status_reason_text = ?
+      WHERE id = ?
+    `;
+
+    db.query(sql, [status, reason, reportId], (error, results) => {
+      if (error) {
+        console.error("Erro ao atualizar status da denúncia:", error);
+        return res.status(500).send({ status: false, message: "Erro interno ao atualizar status da denúncia." });
+      }
+      if (results.affectedRows === 0) {
+        return res.status(404).send({ status: false, message: "Denúncia não encontrada." });
+      }
+
+      res.status(200).send({ status: true, message: "Status da denúncia atualizado com sucesso." });
+
+      if (status === 'justificado' || status === 'nao_justificado') {
+        let notificationMessage = '';
+        if (status === 'justificado') {
+          notificationMessage = 'Recebemos sua denúncia e, após uma avaliação, ela se conferiu válida. Logo, a postagem foi excluída.';
+        } else if (status === 'nao_justificado') {
+          notificationMessage = 'Recebemos sua denúncia e, após uma avaliação, ela não se conferiu válida. Logo, a postagem não foi excluída.';
+        }
+
+        const insertNotificationSql = `
+          INSERT INTO notifications (receiver_id, sender_id, type, post_id, post_title, message)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `;
+        const adminSenderId = 0;
+
+        db.query(insertNotificationSql, [reporterId, adminSenderId, 'report_outcome_admin', postId, postTitle, notificationMessage], (notifErr) => {
+          if (notifErr) {
+            console.error("Erro (fire-and-forget) ao criar notificação de resultado da denúncia:", notifErr);
+          }
+        });
+      }
+    });
   });
 });
