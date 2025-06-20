@@ -59,44 +59,46 @@ server.get("/api/users", (req, res) => {
     const currentUserId = parseInt(req.query.currentUserId);
     const limit = parseInt(req.query.limit) || 10;
     const offset = parseInt(req.query.offset) || 0;
-    const sortByFollows = req.query.sortByFollows === 'true'; //sortby da lista por pessoas que o user logado segue
+    const sortByFollows = req.query.sortByFollows === 'true';
 
     let selectClause = `SELECT u.*, COALESCE(r.reports_count, 0) as reports_count`;
     let fromClause = `
-        FROM users u
-        LEFT JOIN (
-            SELECT reported_user_id, COUNT(*) as reports_count
-            FROM reports
-            GROUP BY reported_user_id
-        ) r ON u.id = r.reported_user_id
+    FROM users u
+    LEFT JOIN (
+        SELECT reported_user_id, COUNT(*) as reports_count
+        FROM reports
+        GROUP BY reported_user_id
+    ) r ON u.id = r.reported_user_id
     `;
-    let whereClause = ` WHERE 1=1 `;
+    //condição para não mostrar usuários banidos
+    let whereClause = ` WHERE u.is_banned = 0 `;
+
     let queryParams = [];
 
     let orderByClause;
 
     if (sortByFollows) {
         orderByClause = `
-            ORDER BY
-                CASE WHEN f.following_id IS NOT NULL THEN 0 ELSE 1 END ASC,
-                u.role DESC,
-                u.name ASC
+        ORDER BY
+        CASE WHEN f.following_id IS NOT NULL THEN 0 ELSE 1 END ASC,
+        u.role DESC,
+        u.name ASC
         `;
     } else {
         orderByClause = `
-            ORDER BY
-                u.role DESC,
-                CASE
-                    WHEN u.role = 0 THEN COALESCE(r.reports_count, 0)
-                    ELSE NULL
-                END DESC,
-                u.name ASC
+        ORDER BY
+        u.role DESC,
+        CASE
+            WHEN u.role = 0 THEN COALESCE(r.reports_count, 0)
+            ELSE NULL
+        END DESC,
+        u.name ASC
         `;
     }
 
     if (sortByFollows) {
         fromClause += `
-            LEFT JOIN follows f ON u.id = f.following_id AND f.follower_id = ?
+        LEFT JOIN follows f ON u.id = f.following_id AND f.follower_id = ?
         `;
         queryParams.push(currentUserId);
 
@@ -105,8 +107,8 @@ server.get("/api/users", (req, res) => {
 
         if (currentUserId) {
             whereClause += `
-                AND u.id NOT IN (SELECT blocked_id FROM blocks WHERE blocker_id = ?)
-                AND u.id NOT IN (SELECT blocker_id FROM blocks WHERE blocked_id = ?)
+            AND u.id NOT IN (SELECT blocked_id FROM blocks WHERE blocker_id = ?)
+            AND u.id NOT IN (SELECT blocker_id FROM blocks WHERE blocked_id = ?)
             `;
             queryParams.push(currentUserId, currentUserId);
         }
@@ -165,11 +167,21 @@ server.post('/api/login', (req, res) => {
 
         const user = result[0];
 
+        //verifica se o usuário está banido
+        if (user.is_banned === 1) {
+            console.log("Usuário banido tentando logar:", user.username);
+            return res.status(403).send({ //403 Forbidden para acesso negado
+                status: false,
+                message: "Você foi banida por receber três ou mais denúncias válidas em seu perfil."
+            });
+        }
+
         if (user.password !== password) {
             console.log("Senha incorreta para usuário:", user.username);
             return res.status(401).send({ status: false, message: "Senha incorreta" });
         }
 
+        //se a senha estiver correta e o usuário não estiver banido
         const { password_hash, ...userData } = user;
         res.send({ status: true, data: userData });
     });
@@ -358,61 +370,91 @@ const transporter = nodemailer.createTransport({
 server.post('/api/initiate-registration', (req, res) => {
     const { username, name, email, password } = req.body;
 
-    //verifica se email ou user existe
-    const checkUserSql = "SELECT * FROM users WHERE username = ? OR email = ?";
+    //verifica se o email já está em uso por um usuário não banido ou se o username já está em uso
+    const checkUserSql = "SELECT id, email, username, is_banned FROM users WHERE username = ? OR email = ?";
     db.query(checkUserSql, [username, email], (error, result) => {
         if (error) {
-            console.error("Erro ao consultar a tabela users:", error);
             return res.status(500).send({ status: false, message: "Erro ao acessar a base de dados" });
         }
 
         if (result.length > 0) {
             const existingUser = result[0];
             if (existingUser.email === email) {
+                //se o email existe e o usuário está banido, informa sobre o banimento
+                if (existingUser.is_banned === 1) {
+                    return res.status(409).send({
+                        status: false,
+                        field: 'email',
+                        message: "A usuária associada a esse e-mail foi banida por receber três ou mais denúncias válidas em seu perfil."
+                    });
+                }
+                //se o email existe e o usuário não está banido, é um email já cadastrado normal
                 return res.status(409).send({ status: false, field: 'email', message: "Email já cadastrado" });
             }
             if (existingUser.username === username) {
+                if (existingUser.is_banned === 1) {
+                    return res.status(409).send({
+                        status: false,
+                        field: 'username',
+                        message: "O nome de usuário associado a esse e-mail foi banido."
+                    });
+                }
                 return res.status(409).send({ status: false, field: 'username', message: "Usuário já cadastrado" });
             }
         }
 
-        //gera codigo para verificação
-        const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
-        const expiresAt = new Date(Date.now() + 15 * 60 * 1000); //valido por 15 minutos
-
-        //envia email de verificação
-        const mailOptions = {
-            from: 'hearlert.fl@gmail.com',
-            to: email,
-            subject: 'Código de Verificação Hearlert',
-            html: `
-                <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-                    <h2>Verificação de E-mail para Heralert</h2>
-                    <p>Olá,</p>
-                    <p>Obrigada por se registrar no Heralert! Para completar o seu cadastro, por favor, utilize o seguinte código de verificação:</p>
-                    <p style="font-size: 24px; font-weight: bold; color: #FF9D9D; text-align: center; background-color: #f0f0f0; padding: 10px; border-radius: 5px;">${verificationCode}</p>
-                    <p>Este código é válido por 15 minutos.</p>
-                    <p>Se você não solicitou este código, por favor, ignore este e-mail.</p>
-                    <p>Atenciosamente,<br/>Equipe Heralert</p>
-                </div>
-            `
-        };
-
-        transporter.sendMail(mailOptions, (mailError, info) => {
-            if (mailError) {
-                console.error("Erro ao enviar e-mail de verificação:", mailError);
-                return res.status(500).send({ status: false, message: "Erro ao enviar e-mail de verificação." });
+        //verifica se o email está na tabela banned_users
+        const checkBannedEmailSql = "SELECT 1 FROM banned_users WHERE email = ? LIMIT 1";
+        db.query(checkBannedEmailSql, [email], (bannedError, bannedResults) => {
+            if (bannedError) {
+                return res.status(500).send({ status: false, message: "Erro ao acessar a base de dados (banned_users)." });
             }
-            console.log('E-mail de verificação enviado:', info.response);
 
-            //guarda dados temporariamente para validação
-            const pendingRegistrationData = { username, name, email, password, verificationCode, expiresAt };
-            if (!global.pendingRegistrations) {
-                global.pendingRegistrations = new Map();
+            if (bannedResults.length > 0) {
+                return res.status(409).send({
+                    status: false,
+                    field: 'email',
+                    message: "A usuária associada a esse e-mail foi banida por receber três ou mais denúncias válidas em seu perfil."
+                });
             }
-            global.pendingRegistrations.set(email, pendingRegistrationData);
 
-            res.status(200).send({ status: true, message: "Código de verificação enviado com sucesso para o seu e-mail.", email: email });
+            //se passou por todas as verificações, pode iniciar o registro e enviar o e-mail
+            const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
+            const expiresAt = new Date(Date.now() + 15 * 60 * 1000); //válido por 15 minutos
+
+            //envia email de verificação
+            const mailOptions = {
+                from: 'hearlert.fl@gmail.com',
+                to: email,
+                subject: 'Código de Verificação Hearlert',
+                html: `
+          <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+            <h2>Verificação de E-mail para Heralert</h2>
+            <p>Olá,</p>
+            <p>Obrigada por se registrar no Heralert! Para completar o seu cadastro, por favor, utilize o seguinte código de verificação:</p>
+            <p style="font-size: 24px; font-weight: bold; color: #FF9D9D; text-align: center; background-color: #f0f0f0; padding: 10px; border-radius: 5px;">${verificationCode}</p>
+            <p>Este código é válido por 15 minutos.</p>
+            <p>Se você não solicitou este código, por favor, ignore este e-mail.</p>
+            <p>Atenciosamente,<br/>Equipe Heralert</p>
+          </div>
+        `
+            };
+
+            transporter.sendMail(mailOptions, (mailError, info) => {
+                if (mailError) {
+                    console.error("Erro ao enviar e-mail de verificação:", mailError);
+                    return res.status(500).send({ status: false, message: "Erro ao enviar e-mail de verificação." });
+                }
+                console.log('E-mail de verificação enviado:', info.response);
+
+                const pendingRegistrationData = { username, name, email, password, verificationCode, expiresAt };
+                if (!global.pendingRegistrations) {
+                    global.pendingRegistrations = new Map();
+                }
+                global.pendingRegistrations.set(email, pendingRegistrationData);
+
+                res.status(200).send({ status: true, message: "Código de verificação enviado com sucesso para o seu e-mail.", email: email });
+            });
         });
     });
 });
@@ -768,9 +810,15 @@ server.delete("/api/follows", (req, res) => {
 //busca followings para refresh
 server.get("/api/follows/following/:userId", (req, res) => {
     const userId = req.params.userId;
-    const sql = "SELECT following_id FROM follows WHERE follower_id = ?";
+    const sql = `
+        SELECT f.following_id
+        FROM follows f
+        JOIN users u ON f.following_id = u.id
+        WHERE f.follower_id = ? AND u.is_banned = 0`;
     db.query(sql, [userId], (err, results) => {
-        if (err) return res.status(500).json({ status: false, message: "Erro" });
+        if (err) {
+            return res.status(500).json({ status: false, message: "Erro" });
+        }
         res.json({ status: true, data: results });
     });
 });
@@ -779,12 +827,14 @@ server.get("/api/follows/following/:userId", (req, res) => {
 server.get("/api/follows/following-users/:userId", (req, res) => {
     const userId = req.params.userId;
     const sql = `
-      SELECT u.id, u.username, u.name, u.profile_pic
-      FROM follows f
-      JOIN users u ON f.following_id = u.id
-      WHERE f.follower_id = ?`;
+    SELECT u.id, u.username, u.name, u.profile_pic
+    FROM follows f
+    JOIN users u ON f.following_id = u.id
+    WHERE f.follower_id = ? AND u.is_banned = 0`;
     db.query(sql, [userId], (err, results) => {
-        if (err) return res.status(500).json({ status: false, message: "Erro" });
+        if (err) {
+            return res.status(500).json({ status: false, message: "Erro" });
+        }
         res.json({ status: true, data: results });
     });
 });
@@ -793,13 +843,15 @@ server.get("/api/follows/following-users/:userId", (req, res) => {
 server.get("/api/follows/followers-users/:userId", (req, res) => {
     const userId = req.params.userId;
     const sql = `
-      SELECT u.id, u.username, u.name, u.profile_pic
-      FROM follows f
-      JOIN users u ON f.follower_id = u.id
-      WHERE f.following_id = ?
+    SELECT u.id, u.username, u.name, u.profile_pic
+    FROM follows f
+    JOIN users u ON f.follower_id = u.id
+    WHERE f.following_id = ? AND u.is_banned = 0
     `;
     db.query(sql, [userId], (err, results) => {
-        if (err) return res.status(500).json({ status: false, message: "Erro" });
+        if (err) {
+            return res.status(500).json({ status: false, message: "Erro" });
+        }
         res.json({ status: true, data: results });
     });
 });
@@ -961,10 +1013,10 @@ server.get("/api/users/by-ids", (req, res) => {
 
 //notificações gerais
 server.get('/api/notifications/:userId', (req, res) => {
-  const userId = req.params.userId;
-  const search = req.query.search || '';
+    const userId = req.params.userId;
+    const search = req.query.search || '';
 
-  let sql = `
+    let sql = `
     SELECT
       n.*,
       u.username,
@@ -976,27 +1028,27 @@ server.get('/api/notifications/:userId', (req, res) => {
     WHERE n.receiver_id = ?
   `;
 
-  const params = [userId];
+    const params = [userId];
 
-  if (search.trim() !== '') {
-    sql += ` AND (
+    if (search.trim() !== '') {
+        sql += ` AND (
       u.username LIKE ? OR
       COALESCE(n.message, '') LIKE ? OR
       COALESCE(n.post_title, p.title) LIKE ?
     )`;
-    const like = `%${search}%`;
-    params.push(like, like, like);
-  }
-
-  sql += ` ORDER BY n.created_at DESC`;
-
-  db.query(sql, params, (err, results) => {
-    if (err) {
-      console.error('Erro no banco:', err);
-      return res.status(500).send({ status: false, message: 'Erro ao buscar notificações' });
+        const like = `%${search}%`;
+        params.push(like, like, like);
     }
-    res.send({ status: true, data: results });
-  });
+
+    sql += ` ORDER BY n.created_at DESC`;
+
+    db.query(sql, params, (err, results) => {
+        if (err) {
+            console.error('Erro no banco:', err);
+            return res.status(500).send({ status: false, message: 'Erro ao buscar notificações' });
+        }
+        res.send({ status: true, data: results });
+    });
 });
 
 //contagem de notificações
@@ -1260,12 +1312,49 @@ server.post("/api/comments", (req, res) => {
 server.delete("/api/comments/:id", (req, res) => {
     const commentId = parseInt(req.params.id);
 
-    const sql = `DELETE FROM comments WHERE id = ?`;
-    db.query(sql, [commentId], (error, result) => {
-        if (error) {
-            return res.status(500).send({ status: false, message: "Erro ao deletar comentário" });
+    if (isNaN(commentId)) {
+        return res.status(400).send({ status: false, message: "ID do comentário inválido." });
+    }
+
+    db.beginTransaction(err => {
+        if (err) {
+            return res.status(500).send({ status: false, message: "Erro interno ao deletar comentário." });
         }
-        res.send({ status: true, message: "Comentário deletado com sucesso" });
+
+        const deleteReportsSql = `DELETE FROM reports WHERE target_type = 'comment' AND target_id = ?`;
+        db.query(deleteReportsSql, [commentId], (err, reportsResult) => {
+            if (err) {
+                return db.rollback(() => {
+                    console.error("Erro ao deletar denúncias de comentário:", err);
+                    res.status(500).send({ status: false, message: "Erro ao deletar denúncias de comentário." });
+                });
+            }
+
+            const deleteCommentSql = `DELETE FROM comments WHERE id = ?`;
+            db.query(deleteCommentSql, [commentId], (err, commentResult) => {
+                if (err) {
+                    return db.rollback(() => {
+                        console.error("Erro ao deletar comentário:", err);
+                        res.status(500).send({ status: false, message: "Erro ao deletar comentário." });
+                    });
+                }
+
+                if (commentResult.affectedRows === 0) {
+                    return db.rollback(() => {
+                        res.status(404).send({ status: false, message: "Comentário não encontrado." });
+                    });
+                }
+
+                db.commit(err => {
+                    if (err) {
+                        return db.rollback(() => {
+                            res.status(500).send({ status: false, message: "Erro interno ao deletar comentário." });
+                        });
+                    }
+                    res.status(200).send({ status: true, message: "Comentário e denúncias associadas deletadas com sucesso!" });
+                });
+            });
+        });
     });
 });
 
@@ -1298,63 +1387,63 @@ server.put('/api/posts/:id', (req, res) => {
 
 //deletar um post
 server.delete('/api/posts/:id', (req, res) => {
-  const postId = req.params.id;
-  let postOwnerId = null;
-  let postTitle = null;
+    const postId = req.params.id;
+    let postOwnerId = null;
+    let postTitle = null;
 
-  const getPostDetailsSql = "SELECT user_id, title FROM posts WHERE id = ?";
-  db.query(getPostDetailsSql, [postId], (err, postResults) => {
-    if (err) {
-      console.error("Erro ao buscar detalhes do post para notificação:", err);
-      return res.status(500).send({ status: false, message: "Erro ao buscar detalhes do post." });
-    }
-    if (postResults.length === 0) {
-      return res.status(404).send({ status: false, message: "Postagem não encontrada." });
-    }
-
-    postOwnerId = postResults[0].user_id;
-    postTitle = postResults[0].title;
-
-    const deleteTagsSql = "DELETE FROM post_tags WHERE post_id = ?";
-    const deleteReportsSql = "DELETE FROM reports WHERE target_type = 'post' AND target_id = ?";
-    const deletePostSql = "DELETE FROM posts WHERE id = ?";
-
-    db.query(deleteTagsSql, [postId], (err) => {
-      if (err) {
-        console.error("Erro ao remover tags do post:", err);
-        return res.status(500).send({ status: false, message: "Erro ao remover tags do post" });
-      }
-
-      db.query(deleteReportsSql, [postId], (err1) => {
-        if (err1) {
-          console.error("Erro ao remover denúncias do post:", err1);
-          return res.status(500).send({ status: false, message: "Erro ao remover denúncias do post" });
+    const getPostDetailsSql = "SELECT user_id, title FROM posts WHERE id = ?";
+    db.query(getPostDetailsSql, [postId], (err, postResults) => {
+        if (err) {
+            console.error("Erro ao buscar detalhes do post para notificação:", err);
+            return res.status(500).send({ status: false, message: "Erro ao buscar detalhes do post." });
+        }
+        if (postResults.length === 0) {
+            return res.status(404).send({ status: false, message: "Postagem não encontrada." });
         }
 
-        db.query(deletePostSql, [postId], (err2) => {
-          if (err2) {
-            console.error("Erro ao deletar post:", err2);
-            return res.status(500).send({ status: false, message: "Erro ao deletar post" });
-          }
+        postOwnerId = postResults[0].user_id;
+        postTitle = postResults[0].title;
 
-          const notificationType = 'post_deleted_admin';
-          const notificationMessage = 'Recebemos uma denúncia da sua postagem que se conferiu verdadeira, logo, ela foi excluída.';
-          const insertNotificationSql = `
+        const deleteTagsSql = "DELETE FROM post_tags WHERE post_id = ?";
+        const deleteReportsSql = "DELETE FROM reports WHERE target_type = 'post' AND target_id = ?";
+        const deletePostSql = "DELETE FROM posts WHERE id = ?";
+
+        db.query(deleteTagsSql, [postId], (err) => {
+            if (err) {
+                console.error("Erro ao remover tags do post:", err);
+                return res.status(500).send({ status: false, message: "Erro ao remover tags do post" });
+            }
+
+            db.query(deleteReportsSql, [postId], (err1) => {
+                if (err1) {
+                    console.error("Erro ao remover denúncias do post:", err1);
+                    return res.status(500).send({ status: false, message: "Erro ao remover denúncias do post" });
+                }
+
+                db.query(deletePostSql, [postId], (err2) => {
+                    if (err2) {
+                        console.error("Erro ao deletar post:", err2);
+                        return res.status(500).send({ status: false, message: "Erro ao deletar post" });
+                    }
+
+                    const notificationType = 'post_deleted_admin';
+                    const notificationMessage = 'Recebemos uma denúncia da sua postagem que se conferiu verdadeira, logo, ela foi excluída.';
+                    const insertNotificationSql = `
             INSERT INTO notifications (receiver_id, sender_id, type, post_id, post_title, message)
             VALUES (?, ?, ?, ?, ?, ?)
           `;
-          const adminSenderId = 0;
+                    const adminSenderId = 0;
 
-          db.query(insertNotificationSql, [postOwnerId, adminSenderId, notificationType, postId, postTitle, notificationMessage], (notifErr) => {
-            if (notifErr) {
-              console.error("Erro ao criar notificação de postagem excluída para o dono:", notifErr);
-            }
-            res.send({ status: true, message: "Postagem e denúncias associadas deletadas com sucesso! Notificação enviada ao usuário." });
-          });
+                    db.query(insertNotificationSql, [postOwnerId, adminSenderId, notificationType, postId, postTitle, notificationMessage], (notifErr) => {
+                        if (notifErr) {
+                            console.error("Erro ao criar notificação de postagem excluída para o dono:", notifErr);
+                        }
+                        res.send({ status: true, message: "Postagem e denúncias associadas deletadas com sucesso! Notificação enviada ao usuário." });
+                    });
+                });
+            });
         });
-      });
     });
-  });
 });
 
 //buscars todas as tags
@@ -2023,16 +2112,15 @@ server.post("/api/reports", (req, res) => {
         return res.status(400).send({ status: false, message: "Dados da denúncia incompletos." });
     }
 
-    //validação para target_type
     const allowedTargetTypes = ['user', 'post', 'comment'];
     if (!allowedTargetTypes.includes(target_type)) {
         return res.status(400).send({ status: false, message: "Tipo de alvo de denúncia inválido." });
     }
 
     const sql = `
-    INSERT INTO reports (reporter_id, reported_user_id, target_type, target_id, reason)
-    VALUES (?, ?, ?, ?, ?)
-  `;
+        INSERT INTO reports (reporter_id, reported_user_id, target_type, target_id, reason)
+        VALUES (?, ?, ?, ?, ?)
+    `;
 
     console.log("Recebido:", { reporter_id, reported_user_id, target_type, target_id, reason });
 
@@ -2047,54 +2135,66 @@ server.post("/api/reports", (req, res) => {
 
 //para deletar uma denúncia
 server.delete("/api/reports/:id", (req, res) => {
-  const reportId = req.params.id;
+    const reportId = req.params.id;
 
-  if (!reportId) {
-    return res.status(400).send({ status: false, message: "ID da denúncia não fornecido." });
-  }
-
-  const sql = `DELETE FROM reports WHERE id = ?`;
-
-  db.query(sql, [reportId], (error, results) => {
-    if (error) {
-      console.error("Erro ao deletar denúncia:", error);
-      return res.status(500).send({ status: false, message: "Erro interno ao deletar denúncia." });
+    if (!reportId) {
+        return res.status(400).send({ status: false, message: "ID da denúncia não fornecido." });
     }
 
-    if (results.affectedRows === 0) {
-      return res.status(404).send({ status: false, message: "Denúncia não encontrada." });
-    }
+    const sql = `DELETE FROM reports WHERE id = ?`;
 
-    res.status(200).send({ status: true, message: "Denúncia deletada com sucesso!" });
-  });
+    db.query(sql, [reportId], (error, results) => {
+        if (error) {
+            console.error("Erro ao deletar denúncia:", error);
+            return res.status(500).send({ status: false, message: "Erro interno ao deletar denúncia." });
+        }
+
+        if (results.affectedRows === 0) {
+            return res.status(404).send({ status: false, message: "Denúncia não encontrada." });
+        }
+
+        res.status(200).send({ status: true, message: "Denúncia deletada com sucesso!" });
+    });
 });
 
-//para buscar reports
+//para buscar reports de posts e comentários
 server.get("/api/reports", (req, res) => {
-    const { search, status, limit, offset } = req.query;
+    const { search, status, limit, offset, targetType } = req.query;
 
     let baseSql = `
         SELECT
-        r.id AS report_id,
-        r.created_at AS report_created_at,
-        r.reason AS report_reason,
-        r.status AS report_status,
-        r.status_reason_text AS status_reason_text,
-        rep_u.username AS reporter_username,
-        rep_u.name AS reporter_name,
-        reported_u.username AS reported_username,
-        reported_u.name AS reported_name,
-        p.title AS post_title,
-        p.community AS post_community,
-        p.id AS post_id
+            r.id AS report_id,
+            r.target_id AS target_id,
+            r.created_at AS report_created_at,
+            r.reason AS report_reason,
+            r.status AS report_status,
+            r.status_reason_text AS status_reason_text,
+            rep_u.username AS reporter_username,
+            rep_u.name AS reporter_name,
+            reported_u.username AS reported_username,
+            reported_u.name AS reported_name,
+            COALESCE(p_post.title, p_comment.title) AS post_title,
+            COALESCE(p_post.community, p_comment.community) AS post_community,
+            COALESCE(p_post.id, p_comment.id) AS post_id,
+            c.content AS comment_text,
+            c.post_id AS comment_post_id
         FROM heralert.reports r
         JOIN users rep_u ON r.reporter_id = rep_u.id
         JOIN users reported_u ON r.reported_user_id = reported_u.id
-        LEFT JOIN posts p ON r.target_type = 'post' AND r.target_id = p.id
+        LEFT JOIN comments c ON r.target_type = 'comment' AND r.target_id = c.id
+        LEFT JOIN posts p_post ON r.target_type = 'post' AND r.target_id = p_post.id
+        LEFT JOIN posts p_comment ON r.target_type = 'comment' AND c.post_id = p_comment.id
     `;
 
-    const conditions = ["r.target_type = 'post'"];
+    const conditions = [];
     const params = [];
+
+    if (targetType) {
+        conditions.push("r.target_type = ?");
+        params.push(targetType);
+    } else {
+        conditions.push("r.target_type = 'post'");
+    }
 
     if (status) {
         conditions.push("r.status = ?");
@@ -2102,8 +2202,16 @@ server.get("/api/reports", (req, res) => {
     }
 
     if (search) {
-        conditions.push("(p.title LIKE ? OR rep_u.username LIKE ? OR reported_u.username LIKE ?)");
-        params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+        if (targetType === 'post') {
+            conditions.push("(p.title LIKE ? OR rep_u.username LIKE ? OR reported_u.username LIKE ?)");
+            params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+        } else if (targetType === 'comment') {
+            conditions.push("(c.content LIKE ? OR rep_u.username LIKE ? OR reported_u.username LIKE ?)");
+            params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+        } else {
+            conditions.push("(p.title LIKE ? OR c.content LIKE ? OR rep_u.username LIKE ? OR reported_u.username LIKE ?)");
+            params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
+        }
     }
 
     if (conditions.length > 0) {
@@ -2117,12 +2225,14 @@ server.get("/api/reports", (req, res) => {
 
     db.query(countSql, params, (countError, countResults) => {
         if (countError) {
+            console.error("Erro interno ao buscar denúncias (contagem):", countError);
             return res.status(500).send({ status: false, message: "Erro interno ao buscar denúncias." });
         }
         const totalReports = countResults[0].total;
 
         db.query(paginatedSql, paginatedParams, (error, results) => {
             if (error) {
+                console.error("Erro interno ao buscar denúncias:", error);
                 return res.status(500).send({ status: false, message: "Erro interno ao buscar denúncias." });
             }
             res.send({ status: true, data: { reports: results, total: totalReports } });
@@ -2130,78 +2240,522 @@ server.get("/api/reports", (req, res) => {
     });
 });
 
+//para atualizar estado da denuncia de post/comentário
 server.put("/api/reports/:id/status", (req, res) => {
-  const reportId = req.params.id;
-  const { status, reason } = req.body;
+    const reportId = req.params.id;
+    const { status, reason } = req.body;
 
-  if (!status) {
-    return res.status(400).send({ status: false, message: "Status é obrigatório." });
-  }
-
-  if ((status === 'nao_justificado' || status === 'justificado') && !reason) {
-    return res.status(400).send({ status: false, message: "O motivo do estado é obrigatório para este status." });
-  }
-
-  const getReportDetailsSql = `
-    SELECT
-      r.reporter_id,
-      r.target_id AS post_id,
-      p.title AS post_title
-    FROM heralert.reports r
-    LEFT JOIN posts p ON r.target_type = 'post' AND r.target_id = p.id
-    WHERE r.id = ?
-  `;
-
-  db.query(getReportDetailsSql, [reportId], (err, reportDetails) => {
-    if (err) {
-      console.error("Erro ao buscar detalhes da denúncia:", err);
-      return res.status(500).send({ status: false, message: "Erro interno ao buscar detalhes da denúncia." });
-    }
-    if (reportDetails.length === 0) {
-      return res.status(404).send({ status: false, message: "Denúncia não encontrada." });
+    if (!status) {
+        return res.status(400).send({ status: false, message: "Status é obrigatório." });
     }
 
-    const reporterId = reportDetails[0].reporter_id;
-    const postId = reportDetails[0].post_id;
-    const postTitle = reportDetails[0].post_title;
+    if ((status === 'nao_justificado' || status === 'justificado') && !reason) {
+        return res.status(400).send({ status: false, message: "O motivo do estado é obrigatório para este status." });
+    }
 
-    const sql = `
-      UPDATE heralert.reports
-      SET status = ?, status_reason_text = ?
-      WHERE id = ?
+    const getReportDetailsSql = `
+        SELECT
+            r.reporter_id,
+            r.reported_user_id,
+            r.target_type,
+            r.target_id,
+            p.title AS post_title,
+            c.content AS comment_text,
+            c.post_id AS comment_post_id
+        FROM heralert.reports r
+        JOIN users rep_u ON r.reporter_id = rep_u.id
+        LEFT JOIN comments c ON r.target_type = 'comment' AND r.target_id = c.id
+        LEFT JOIN posts p ON
+            (r.target_type = 'post' AND r.target_id = p.id) OR
+            (r.target_type = 'comment' AND c.post_id = p.id)
+        WHERE r.id = ?
     `;
 
-    db.query(sql, [status, reason, reportId], (error, results) => {
-      if (error) {
-        console.error("Erro ao atualizar status da denúncia:", error);
-        return res.status(500).send({ status: false, message: "Erro interno ao atualizar status da denúncia." });
-      }
-      if (results.affectedRows === 0) {
-        return res.status(404).send({ status: false, message: "Denúncia não encontrada." });
-      }
-
-      res.status(200).send({ status: true, message: "Status da denúncia atualizado com sucesso." });
-
-      if (status === 'justificado' || status === 'nao_justificado') {
-        let notificationMessage = '';
-        if (status === 'justificado') {
-          notificationMessage = 'Recebemos sua denúncia e, após uma avaliação, ela se conferiu válida. Logo, a postagem foi excluída.';
-        } else if (status === 'nao_justificado') {
-          notificationMessage = 'Recebemos sua denúncia e, após uma avaliação, ela não se conferiu válida. Logo, a postagem não foi excluída.';
+    db.query(getReportDetailsSql, [reportId], (err, reportDetails) => {
+        if (err) {
+            console.error("Erro ao buscar detalhes da denúncia:", err);
+            return res.status(500).send({ status: false, message: "Erro interno ao buscar detalhes da denúncia." });
+        }
+        if (reportDetails.length === 0) {
+            return res.status(404).send({ status: false, message: "Denúncia não encontrada." });
         }
 
-        const insertNotificationSql = `
+        const reporterId = reportDetails[0].reporter_id;
+        const reportedUserId = reportDetails[0].reported_user_id;
+        const targetType = reportDetails[0].target_type;
+        const targetId = reportDetails[0].target_id;
+        const postTitle = reportDetails[0].post_title;
+        const commentText = reportDetails[0].comment_text;
+        const commentPostId = reportDetails[0].comment_post_id;
+
+        const sql = `
+            UPDATE heralert.reports
+            SET status = ?, status_reason_text = ?
+            WHERE id = ?
+        `;
+
+        db.query(sql, [status, reason, reportId], (error, results) => {
+            if (error) {
+                console.error("Erro ao atualizar status da denúncia:", error);
+                return res.status(500).send({ status: false, message: "Erro interno ao atualizar status da denúncia." });
+            }
+            if (results.affectedRows === 0) {
+                return res.status(404).send({ status: false, message: "Denúncia não encontrada." });
+            }
+
+            res.status(200).send({ status: true, message: "Status da denúncia atualizado com sucesso." });
+
+            if (status === 'justificado' || status === 'nao_justificado') {
+                let notificationMessageToReporter = '';
+                let relevantPostIdForReporter = null;
+                let relevantPostTitleForReporter = null; //título do post para a notificação do denunciante
+
+                if (targetType === 'post') {
+                    if (status === 'justificado') {
+                        notificationMessageToReporter = 'Recebemos sua denúncia e, após uma avaliação, ela se conferiu válida. Logo, a postagem foi excluída.';
+                    } else { //nao_justificado
+                        notificationMessageToReporter = 'Recebemos sua denúncia e, após uma avaliação, ela não se conferiu válida. Logo, a postagem não foi excluída.';
+                    }
+                    relevantPostIdForReporter = targetId;
+                    relevantPostTitleForReporter = postTitle; //usa o título do post diretamente
+                } else if (targetType === 'comment') {
+                    if (status === 'justificado') {
+                        notificationMessageToReporter = 'Recebemos sua denúncia e, após uma avaliação, ela se conferiu válida. Logo, o comentário foi excluído.';
+                    } else { //nao_justificado
+                        notificationMessageToReporter = 'Recebemos sua denúncia e, após uma avaliação, ela não se conferiu válida. Logo, o comentário não foi excluído.';
+                    }
+                    relevantPostIdForReporter = commentPostId; //ID do post pai do comentário
+                    relevantPostTitleForReporter = `Comentário em: "${postTitle || 'Postagem sem título'}"`; //título do post pai
+                }
+
+                const adminSenderId = 0;
+
+                const insertNotificationSql = `
           INSERT INTO notifications (receiver_id, sender_id, type, post_id, post_title, message)
           VALUES (?, ?, ?, ?, ?, ?)
         `;
-        const adminSenderId = 0;
 
-        db.query(insertNotificationSql, [reporterId, adminSenderId, 'report_outcome_admin', postId, postTitle, notificationMessage], (notifErr) => {
-          if (notifErr) {
-            console.error("Erro (fire-and-forget) ao criar notificação de resultado da denúncia:", notifErr);
-          }
+                //notificar o denunciante (reporterId)
+                db.query(insertNotificationSql, [reporterId, adminSenderId, 'report_outcome_admin', relevantPostIdForReporter, relevantPostTitleForReporter, notificationMessageToReporter], (notifErr) => {
+                    if (notifErr) {
+                        console.error("Erro (fire-and-forget) ao criar notificação de resultado da denúncia para o denunciante:", notifErr);
+                    }
+                });
+
+                //lógica de notificação para o Usuário Reportado (se o conteúdo foi excluído)
+                if (status === 'justificado') {
+                    let notificationMessageToReportedUser = '';
+                    let relevantPostIdForReported = null;
+                    let relevantPostTitleForReported = null; //título do post para a notificação do usuário reportado
+
+                    if (targetType === 'post') {
+                        notificationMessageToReportedUser = 'Recebemos uma denúncia de uma postagem sua que se conferiu verdadeira, logo, ela foi excluída.';
+                        relevantPostIdForReported = targetId;
+                        relevantPostTitleForReported = postTitle; //usa o título do post
+                    } else if (targetType === 'comment') {
+                        notificationMessageToReportedUser = 'Recebemos uma denúncia de um comentário seu que se conferiu verdadeira, logo, ele foi excluído.';
+                        relevantPostIdForReported = commentPostId; //ID do post pai do comentário
+                        relevantPostTitleForReported = `Comentário em: "${postTitle || 'Postagem sem título'}"`; //título do post pai
+                    }
+
+                    if (reportedUserId && reportedUserId !== reporterId) {
+                        db.query(insertNotificationSql, [reportedUserId, adminSenderId, 'content_deleted_by_report', relevantPostIdForReported, relevantPostTitleForReported, notificationMessageToReportedUser], (notifErr) => {
+                            if (notifErr) {
+                                console.error("Erro (fire-and-forget) ao criar notificação para o usuário reportado sobre exclusão de conteúdo:", notifErr);
+                            }
+                        });
+                    }
+                }
+            }
         });
-      }
     });
-  });
+});
+
+//busca denúncias de usuários
+server.get("/api/user-reports", (req, res) => {
+    const { search, status, limit, offset } = req.query;
+
+    let baseSql = `
+    SELECT
+      r.id AS report_id,
+      r.created_at AS report_created_at,
+      r.reason AS report_reason,
+      r.status AS report_status,
+      r.status_reason_text AS status_reason_text,
+      rep_u.username AS reporter_username,
+      rep_u.name AS reporter_name,
+      reported_u.id AS reported_user_id,
+      reported_u.username AS reported_username,
+      reported_u.name AS reported_name,
+      reported_u.role AS reported_user_role,
+      (SELECT COUNT(*) FROM reports WHERE reported_user_id = reported_u.id AND target_type = 'user') AS total_user_reports_count
+    FROM heralert.reports r
+    JOIN users rep_u ON r.reporter_id = rep_u.id
+    JOIN users reported_u ON r.reported_user_id = reported_u.id
+    WHERE r.target_type = 'user'
+  `;
+
+    const conditions = [];
+    const params = [];
+
+    if (status) {
+        conditions.push("r.status = ?");
+        params.push(status);
+    }
+
+    if (search) {
+        conditions.push("(rep_u.username LIKE ? OR reported_u.username LIKE ? OR reported_u.name LIKE ?)");
+        params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+    }
+
+    if (conditions.length > 0) {
+        baseSql += " AND " + conditions.join(" AND ");
+    }
+
+    const countSql = `SELECT COUNT(*) AS total FROM (${baseSql}) AS subquery`;
+
+    const paginatedSql = `${baseSql} ORDER BY r.created_at DESC LIMIT ? OFFSET ?`;
+    const paginatedParams = [...params, parseInt(limit), parseInt(offset)];
+
+    db.query(countSql, params, (countError, countResults) => {
+        if (countError) {
+            console.error("Erro interno ao buscar denúncias de usuários (contagem):", countError);
+            return res.status(500).send({ status: false, message: "Erro interno ao buscar denúncias de usuários." });
+        }
+        const totalReports = countResults[0].total;
+
+        db.query(paginatedSql, paginatedParams, (error, results) => {
+            if (error) {
+                console.error("Erro interno ao buscar denúncias de usuários:", error);
+                return res.status(500).send({ status: false, message: "Erro interno ao buscar denúncias de usuários." });
+            }
+            res.send({ status: true, data: { reports: results, total: totalReports } });
+        });
+    });
+});
+
+//para att o estado da denúncia de usuário
+server.put("/api/user-reports/:id/status", (req, res) => {
+    const reportId = req.params.id;
+    const { status, reason } = req.body;
+
+    if (!status) {
+        return res.status(400).send({ status: false, message: "Status é obrigatório." });
+    }
+
+    if ((status === 'nao_justificado' || status === 'justificado') && !reason) {
+        return res.status(400).send({ status: false, message: "O motivo do estado é obrigatório para este status." });
+    }
+
+    //obtem os detalhes da denúncia e a contagem atual de denúncias válidas
+    const getReportDetailsSql = `
+    SELECT
+      r.reporter_id,
+      r.reported_user_id,
+      r.status AS current_report_status,
+      reported_u.username AS reported_username,
+      (SELECT COUNT(*) FROM reports WHERE reported_user_id = r.reported_user_id AND target_type = 'user' AND status = 'justificado') AS current_total_valid_user_reports_count
+    FROM heralert.reports r
+    JOIN users reported_u ON r.reported_user_id = reported_u.id
+    WHERE r.id = ? AND r.target_type = 'user'
+  `;
+
+    db.query(getReportDetailsSql, [reportId], (err, reportDetails) => {
+        if (err) {
+            console.error("Erro ao buscar detalhes da denúncia de usuário:", err);
+            return res.status(500).send({ status: false, message: "Erro interno ao buscar detalhes da denúncia de usuário." });
+        }
+        if (reportDetails.length === 0) {
+            return res.status(404).send({ status: false, message: "Denúncia de usuário não encontrada ou não é do tipo 'user'." });
+        }
+
+        const reporterId = reportDetails[0].reporter_id;
+        const reportedUserId = reportDetails[0].reported_user_id;
+        const reportedUsername = reportDetails[0].reported_username;
+        const currentReportStatus = reportDetails[0].current_report_status; //status atual da denúncia
+        let totalValidUserReportsCount = reportDetails[0].current_total_valid_user_reports_count;
+
+        //ajuste a contagem de denúncias válidas com base na mudança de status
+        if (status === 'justificado' && currentReportStatus !== 'justificado') {
+            //se o novo status é 'justificado' e o anterior não era 'justificado', incrementa
+            totalValidUserReportsCount++;
+        } else if (status === 'nao_justificado' && currentReportStatus === 'justificado') {
+            //se o novo status é 'nao_justificado' e o anterior era 'justificado', decrementa
+            totalValidUserReportsCount--;
+        }
+        //se o status não mudou ou mudou para 'em_avaliacao', a contagem permanece a mesma para a lógica de banimento.
+
+        const sql = `
+      UPDATE heralert.reports
+      SET status = ?, status_reason_text = ?
+      WHERE id = ? AND target_type = 'user'
+    `;
+
+        db.query(sql, [status, reason, reportId], (error, results) => {
+            if (error) {
+                console.error("Erro ao atualizar status da denúncia de usuário:", error);
+                return res.status(500).send({ status: false, message: "Erro interno ao atualizar status da denúncia de usuário." });
+            }
+            if (results.affectedRows === 0) {
+                return res.status(404).send({ status: false, message: "Denúncia de usuário não encontrada ou não é do tipo 'user'." });
+            }
+
+            res.status(200).send({ status: true, message: "Status da denúncia de usuário atualizado com sucesso." });
+
+            const adminSenderId = 0; //ID para o "sistema" ou "administrador"
+            const insertNotificationSql = `
+        INSERT INTO notifications (receiver_id, sender_id, type, message)
+        VALUES (?, ?, ?, ?)
+      `;
+
+            //notificação para o DENUNCIANTE
+            let notificationMessageToReporter = '';
+            if (status === 'justificado') {
+                if (totalValidUserReportsCount >= 3) { //se o banimento ocorrer
+                    notificationMessageToReporter = `Recebemos sua denúncia contra o usuário ${reportedUsername} e, após uma avaliação, ela se conferiu válida. Logo, a usuária foi banida.`;
+                } else {
+                    notificationMessageToReporter = `Recebemos sua denúncia contra o usuário ${reportedUsername} e, após uma avaliação, ela se conferiu válida. A usuária foi notificada sobre isso.`;
+                }
+            } else { //status === 'nao_justificado'
+                notificationMessageToReporter = `Recebemos sua denúncia contra o usuário ${reportedUsername} e, após uma avaliação, ela não se conferiu válida.`;
+            }
+
+            db.query(insertNotificationSql, [reporterId, adminSenderId, 'report_outcome_user_admin', notificationMessageToReporter], (notifErr) => {
+                if (notifErr) {
+                    console.error("Erro (fire-and-forget) ao criar notificação de resultado da denúncia de usuário para o denunciante:", notifErr);
+                }
+            });
+
+            //notificação para o USUÁRIO DENUNCIADO (apenas se a denujncia for válida)
+            if (status === 'justificado' && reportedUserId !== reporterId) {
+                let notificationMessageToReportedUser = '';
+                if (totalValidUserReportsCount >= 3) {
+                    notificationMessageToReportedUser = `Recebemos uma denúncia contra você que se conferiu verdadeira. Ao atingir 3 ou mais denúncias válidas, você foi banida.`;
+
+                } else {
+                    notificationMessageToReportedUser = `Recebemos uma denúncia contra você e, após uma avaliação, ela se conferiu válida. Atualmente você tem ${totalValidUserReportsCount} denúncia(s) válida(s) associada(s) à sua conta. Ao atingir 3 ou mais denúncias válidas, você será banida.`;
+                }
+
+                db.query(insertNotificationSql, [reportedUserId, adminSenderId, 'report_outcome_user_admin', notificationMessageToReportedUser], (notifErr) => {
+                    if (notifErr) {
+                        console.error("Erro (fire-and-forget) ao criar notificação de resultado da denúncia de usuário para o denunciado:", notifErr);
+                    }
+                });
+            }
+        });
+    });
+});
+
+//busca usuários a banir (que têm 3 ou mais denúncias válidas)
+server.get("/api/users-to-ban", (req, res) => {
+    const { limit, offset, search } = req.query;
+
+    let searchCondition = "";
+    let searchParams = [];
+
+    if (search && search.trim() !== "") {
+        searchCondition = " AND (u.username LIKE ? OR u.name LIKE ? OR u.email LIKE ?)";
+        const searchTermLike = `%${search.trim()}%`;
+        searchParams = [searchTermLike, searchTermLike, searchTermLike];
+    }
+
+    const baseSql = `
+    SELECT
+      u.id AS user_id,
+      u.username,
+      u.name,
+      u.email,
+      u.role,
+      COUNT(r.id) AS total_valid_reports,
+      (SELECT COUNT(*) FROM reports WHERE reported_user_id = u.id AND target_type = 'user') AS total_user_reports_count
+    FROM users u
+    JOIN reports r ON u.id = r.reported_user_id
+    WHERE r.target_type = 'user' AND r.status = 'justificado'
+    ${searchCondition}
+    GROUP BY u.id, u.username, u.name, u.email, u.role
+    HAVING COUNT(r.id) >= 3
+  `;
+
+    const countSql = `SELECT COUNT(*) AS total FROM (${baseSql}) AS subquery`;
+    const paginatedSql = `${baseSql} ORDER BY total_valid_reports DESC, u.username ASC LIMIT ? OFFSET ?`;
+
+    db.query(countSql, searchParams, (countError, countResults) => {
+        if (countError) {
+            console.error("Erro ao contar usuários a serem banidos:", countError);
+            return res.status(500).send({ status: false, message: "Erro ao buscar usuários para banir." });
+        }
+        const totalUsers = countResults[0].total;
+
+        db.query(paginatedSql, [...searchParams, parseInt(limit), parseInt(offset)], (error, results) => {
+            if (error) {
+                console.error("Erro ao buscar usuários a serem banidos:", error);
+                return res.status(500).send({ status: false, message: "Erro ao buscar usuários para banir." });
+            }
+            res.send({ status: true, data: { users: results, total: totalUsers } }); //retorna 'users' e 'total'
+        });
+    });
+});
+
+//buscar detalhes das denúncias válidas de um usuário específico
+server.get("/api/users/:userId/valid-reports-details", (req, res) => {
+    const userId = parseInt(req.params.userId);
+
+    if (isNaN(userId)) {
+        return res.status(400).send({ status: false, message: "ID do usuário inválido." });
+    }
+
+    const sql = `
+    SELECT
+      r.id AS report_id,
+      r.created_at AS report_created_at,
+      r.reason AS report_reason,
+      r.status AS report_status,
+      r.status_reason_text AS status_reason_text,
+      rep_u.username AS reporter_username
+    FROM reports r
+    JOIN users rep_u ON r.reporter_id = rep_u.id
+    WHERE r.reported_user_id = ? AND r.target_type = 'user' AND r.status = 'justificado'
+    ORDER BY r.created_at DESC;
+  `;
+
+    db.query(sql, [userId], (error, results) => {
+        if (error) {
+            console.error("Erro ao buscar detalhes de denúncias válidas do usuário:", error);
+            return res.status(500).send({ status: false, message: "Erro interno ao buscar detalhes de denúncias." });
+        }
+        res.send({ status: true, data: { validReports: results } });
+    });
+});
+
+//para banir um usuário
+server.put("/api/users/:id/ban", (req, res) => {
+    const userId = parseInt(req.params.id);
+
+    if (isNaN(userId)) {
+        return res.status(400).send({ status: false, message: "ID de usuário inválido." });
+    }
+
+    //obtém o email do usuário antes de bani-lo
+    const getUserEmailSql = "SELECT email, username FROM users WHERE id = ?";
+    db.query(getUserEmailSql, [userId], (err, userResults) => {
+        if (err) {
+            console.error("Erro ao buscar e-mail do usuário para banir:", err);
+            return res.status(500).send({ status: false, message: "Erro interno ao banir usuário." });
+        }
+        if (userResults.length === 0) {
+            return res.status(404).send({ status: false, message: "Usuário não encontrado." });
+        }
+
+        const userEmail = userResults[0].email;
+        const username = userResults[0].username;
+
+        //iniciar uma transação para garantir atomicidade
+        db.beginTransaction(err => {
+            if (err) {
+                console.error("Erro ao iniciar transação para banimento:", err);
+                return res.status(500).send({ status: false, message: "Erro interno ao banir usuário." });
+            }
+
+            const banUserSql = `
+                UPDATE users
+                SET username = CONCAT('banned_', id),
+                    email = CONCAT('banned_', id, '@banned.com'),
+                    name = '[Usuário Banido]',
+                    bio = NULL,
+                    profile_pic = NULL,
+                    cover_pic = NULL,
+                    password = '',
+                    is_banned = 1
+                WHERE id = ?;
+            `;
+
+            db.query(banUserSql, [userId], (err) => {
+                if (err) {
+                    return db.rollback(() => {
+                        console.error("Erro ao marcar usuário como banido:", err);
+                        res.status(500).send({ status: false, message: "Erro ao banir usuário (marcação)." });
+                    });
+                }
+
+                //insere o e-mail na tabela banned_users
+                const insertBannedEmailSql = "INSERT INTO banned_users (user_id, email) VALUES (?, ?) ON DUPLICATE KEY UPDATE banned_at = CURRENT_TIMESTAMP";
+                db.query(insertBannedEmailSql, [userId, userEmail], (err) => {
+                    if (err) {
+                        return db.rollback(() => {
+                            console.error("Erro ao inserir e-mail em banned_users:", err);
+                            res.status(500).send({ status: false, message: "Erro ao banir usuário (registro de e-mail)." });
+                        });
+                    }
+
+                    //deleta todos os posts do usuário banido
+                    const deletePostsSql = "DELETE FROM posts WHERE user_id = ?";
+                    db.query(deletePostsSql, [userId], (err) => {
+                        if (err) {
+                            return db.rollback(() => {
+                                console.error("Erro ao deletar posts do usuário banido:", err);
+                                res.status(500).send({ status: false, message: "Erro ao banir usuário (posts)." });
+                            });
+                        }
+
+                        //deleta todos os comentários do usuário banido
+                        const deleteCommentsSql = "DELETE FROM comments WHERE user_id = ?";
+                        db.query(deleteCommentsSql, [userId], (err) => {
+                            if (err) {
+                                return db.rollback(() => {
+                                    console.error("Erro ao deletar comentários do usuário banido:", err);
+                                    res.status(500).send({ status: false, message: "Erro ao banir usuário (comentários)." });
+                                });
+                            }
+
+                            //deleta todas as denúncias feitas pelo ou contra o usuário banido
+                            const deleteReportsSql = "DELETE FROM reports WHERE reporter_id = ? OR reported_user_id = ?";
+                            db.query(deleteReportsSql, [userId, userId], (err) => {
+                                if (err) {
+                                    return db.rollback(() => {
+                                        console.error("Erro ao deletar denúncias relacionadas ao usuário banido:", err);
+                                        res.status(500).send({ status: false, message: "Erro ao banir usuário (denúncias)." });
+                                    });
+                                }
+                            });
+
+
+                        });
+                    });
+                });
+
+                const deleteReportsSql = "DELETE FROM reports WHERE reporter_id = ? OR reported_user_id = ?";
+                db.query(deleteReportsSql, [userId, userId], (err) => {
+                    if (err) {
+                        return db.rollback(() => {
+                            console.error("Erro ao banir usuário (denúncias):", err);
+                            res.status(500).send({ status: false, message: "Erro ao banir usuário (denúncias)." });
+                        });
+                    }
+
+                    //deleta mensagens de chat do usuário banido
+                    const deleteChatMessagesSql = "DELETE FROM messages WHERE sender_id = ? OR receiver_id = ?";
+                    db.query(deleteChatMessagesSql, [userId, userId], (err) => {
+                        if (err) {
+                            return db.rollback(() => {
+                                console.error("Erro ao deletar mensagens de chat do usuário banido:", err);
+                                res.status(500).send({ status: false, message: "Erro ao banir usuário (chat)." });
+                            });
+                        }
+
+                        //tudo deu certo, commita a transação
+                        db.commit(err => {
+                            if (err) {
+                                return db.rollback(() => {
+                                    console.error("Erro ao commitar transação de banimento:", err);
+                                    res.status(500).send({ status: false, message: "Erro interno ao banir usuário." });
+                                });
+                            }
+                            console.log(`Usuário ${username} (ID: ${userId}) banido com sucesso.`);
+                            res.status(200).send({ status: true, message: `Usuário ${username} banido com sucesso!` });
+                        });
+                    });
+                });
+            });
+        });
+    });
 });
