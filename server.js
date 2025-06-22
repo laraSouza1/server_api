@@ -204,7 +204,6 @@ global.passwordResetTokens = new Map();
 //login
 server.post('/api/login', (req, res) => {
     const { usernameOrEmail, password } = req.body;
-    console.log("Tentativa de login com:", { usernameOrEmail, password });
 
     const sql = "SELECT * FROM users WHERE email = ? OR username = ?";
     db.query(sql, [usernameOrEmail, usernameOrEmail], (error, result) => {
@@ -1993,61 +1992,86 @@ server.get("/api/chats/:userId", (req, res) => {
     const userId = req.params.userId;
     const sql = `
     SELECT
-      u.id AS userId,
-      u.name AS name,
-      u.role AS role,
-      u.username AS username,
-      u.profile_pic AS profile_pic,
-      MAX(m.created_at) AS lastMessageTime,
-      (
-        SELECT sender_id
-        FROM messages
-        WHERE ((sender_id = u.id AND receiver_id = ?) OR (sender_id = ? AND receiver_id = u.id))
-        ORDER BY created_at DESC
-        LIMIT 1
-      ) AS lastMessageSenderId,
-      (
-        SELECT
-          CASE
-            WHEN content REGEXP '\\\\.(jpeg|jpg|gif|png|webp)$' THEN '[imagem]'
-            ELSE content
-          END
-        FROM messages
-        WHERE ((sender_id = u.id AND receiver_id = ?) OR (sender_id = ? AND receiver_id = u.id))
-        ORDER BY created_at DESC
-        LIMIT 1
-      ) AS lastMessageContent
+        u.id AS userId,
+        u.name AS name,
+        u.role AS role,
+        u.username AS username,
+        u.profile_pic AS profile_pic,
+        MAX(m.created_at) AS lastMessageTime,
+        (
+            SELECT sender_id
+            FROM messages
+            WHERE ((sender_id = u.id AND receiver_id = ?) OR (sender_id = ? AND receiver_id = u.id))
+            ORDER BY created_at DESC
+            LIMIT 1
+        ) AS lastMessageSenderId,
+        (
+            SELECT
+                CASE
+                    WHEN content REGEXP '\\\\.(jpeg|jpg|gif|png|webp)$' THEN '[imagem]'
+                    ELSE content
+                END
+            FROM messages
+            WHERE ((sender_id = u.id AND receiver_id = ?) OR (sender_id = ? AND receiver_id = u.id))
+            ORDER BY created_at DESC
+            LIMIT 1
+        ) AS lastMessageContent,
+        (
+            SELECT COUNT(*)
+            FROM messages
+            WHERE sender_id = u.id AND receiver_id = ? AND is_read = FALSE
+        ) AS unreadCount
     FROM messages m
     JOIN users u
-      ON (m.sender_id = u.id AND m.receiver_id = ?)
-      OR (m.receiver_id = u.id AND m.sender_id = ?)
+    ON (m.sender_id = u.id AND m.receiver_id = ?)
+    OR (m.receiver_id = u.id AND m.sender_id = ?)
     AND NOT EXISTS (
-      SELECT 1 FROM deleted_chats dc
-      WHERE dc.user_id = ? AND dc.other_user_id = u.id
+        SELECT 1 FROM deleted_chats dc
+        WHERE dc.user_id = ? AND dc.other_user_id = u.id
     )
     AND u.id NOT IN (
-      SELECT blocked_id FROM blocks WHERE blocker_id = ?
+        SELECT blocked_id FROM blocks WHERE blocker_id = ?
     )
     AND u.id NOT IN (
-      SELECT blocker_id FROM blocks WHERE blocked_id = ?
+        SELECT blocker_id FROM blocks WHERE blocked_id = ?
     )
     GROUP BY u.id, u.name, u.username, u.profile_pic
     ORDER BY lastMessageTime DESC;
-  `;
+    `;
 
     db.query(sql, [
         userId, userId,
         userId, userId,
+        userId,
         userId, userId,
         userId,
         userId,
         userId
     ], function (error, result) {
         if (error) {
-            console.error("Error fetching chat users:", error);
-            res.status(500).send({ status: false, message: "Error accessing the database" });
+            res.status(500).send({ status: false, message: "Erro acessando a BD" });
         } else {
             res.send({ status: true, data: result });
+        }
+    });
+});
+
+//para marcar mensagens como lidas
+server.put("/api/messages/read/:senderId/:receiverId", (req, res) => {
+    const senderId = req.params.senderId;
+    const receiverId = req.params.receiverId;
+
+    const sql = `
+    UPDATE messages
+    SET is_read = TRUE
+    WHERE sender_id = ? AND receiver_id = ? AND is_read = FALSE;
+    `;
+
+    db.query(sql, [senderId, receiverId], function (error, result) {
+        if (error) {
+            res.status(500).send({ status: false, message: "Erro atualizando mensagens" });
+        } else {
+            res.status(200).send({ status: true, message: "Messages marcadas como lidas com sucesso" });
         }
     });
 });
@@ -2064,8 +2088,7 @@ server.get("/api/messages/:user1Id/:user2Id", (req, res) => {
     `;
     db.query(sql, [user1Id, user2Id, user2Id, user1Id], function (error, result) {
         if (error) {
-            console.error("Error fetching messages:", error);
-            res.status(500).send({ status: false, message: "Error accessing the database" });
+            res.status(500).send({ status: false, message: "Erro acessando a BD" });
         } else {
             res.send({ status: true, data: result });
         }
@@ -2078,11 +2101,10 @@ server.post("/api/messages", (req, res) => {
     const sql = "INSERT INTO messages (sender_id, receiver_id, content) VALUES (?, ?, ?)";
     db.query(sql, [sender_id, receiver_id, content], function (error, result) {
         if (error) {
-            console.error("Error sending message:", error);
-            res.status(500).send({ status: false, message: "Error sending message" });
+            res.status(500).send({ status: false, message: "Erro enviando mensagem" });
         } else {
             //retorna o ID da nova mensagem inserida
-            res.status(201).send({ status: true, message: "Message sent successfully", data: { id: result.insertId } });
+            res.status(201).send({ status: true, message: "Mensagem enviada com sucesso", data: { id: result.insertId } });
         }
     });
 });
@@ -2093,10 +2115,9 @@ server.delete("/api/messages/:id", (req, res) => {
     const sql = "DELETE FROM messages WHERE id = ?";
     db.query(sql, [messageId], function (error, result) {
         if (error) {
-            console.error("Error deleting message:", error);
-            res.status(500).send({ status: false, message: "Error deleting message" });
+            res.status(500).send({ status: false, message: "Erro deletando mensagem" });
         } else {
-            res.status(200).send({ status: true, message: "Message deleted successfully" });
+            res.status(200).send({ status: true, message: "Mensagem deletada com sucesso" });
         }
     });
 });
@@ -2109,7 +2130,6 @@ server.post("/api/deleted-chats", (req, res) => {
     const checkSql = "SELECT * FROM deleted_chats WHERE user_id = ? AND other_user_id = ?";
     db.query(checkSql, [user_id, other_user_id], (err, result) => {
         if (err) {
-            console.error("Error checking deleted chat:", err);
             return res.status(500).send({ status: false, message: "Erro ao verificar chat oculto" });
         }
 
@@ -2121,7 +2141,6 @@ server.post("/api/deleted-chats", (req, res) => {
             const insertSql = "INSERT INTO deleted_chats (user_id, other_user_id) VALUES (?, ?)";
             db.query(insertSql, [user_id, other_user_id], (err) => {
                 if (err) {
-                    console.error("Error inserting deleted chat:", err);
                     return res.status(500).send({ status: false, message: "Erro ao ocultar chat" });
                 }
                 res.send({ status: true, message: "Chat ocultado com sucesso." });
@@ -2140,7 +2159,6 @@ server.post("/api/delete-messages-only", (req, res) => {
     `;
     db.query(sql, [user_id, other_user_id, other_user_id, user_id], (err) => {
         if (err) {
-            console.error("Error deleting messages:", err);
             return res.status(500).send({ status: false, message: "Erro ao apagar mensagens" });
         }
         res.send({ status: true, message: "Mensagens apagadas com sucesso." });
