@@ -1302,7 +1302,7 @@ server.get("/api/posts/:id", (req, res) => {
             FROM comments c
             JOIN users u ON c.user_id = u.id
             WHERE c.post_id = ?
-            ORDER BY c.created_at ASC
+            ORDER BY c.created_at DESC
         `;
 
         db.query(tagSql, [postId], (tagErr, tagsResult) => {
