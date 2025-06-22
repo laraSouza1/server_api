@@ -61,57 +61,34 @@ server.get("/api/users", (req, res) => {
     const offset = parseInt(req.query.offset) || 0;
     const sortByFollows = req.query.sortByFollows === 'true';
 
-    let selectClause = `SELECT u.*, COALESCE(r.reports_count, 0) as reports_count`;
+    let selectClause = `SELECT u.id, u.username, u.name, u.email, u.role, u.created_at, COALESCE(r.reports_count, 0) as reports_count`;
     let fromClause = `
     FROM users u
     LEFT JOIN (
-        SELECT reported_user_id, COUNT(*) as reports_count
-        FROM reports
-        GROUP BY reported_user_id
+      SELECT reported_user_id, COUNT(*) as reports_count
+      FROM reports
+      GROUP BY reported_user_id
     ) r ON u.id = r.reported_user_id
-    `;
+  `;
     //condição para não mostrar usuários banidos
     let whereClause = ` WHERE u.is_banned = 0 `;
 
     let queryParams = [];
 
-    let orderByClause;
-
-    if (sortByFollows) {
-        orderByClause = `
-        ORDER BY
-        CASE WHEN f.following_id IS NOT NULL THEN 0 ELSE 1 END ASC,
-        u.role DESC,
-        u.name ASC
-        `;
-    } else {
-        orderByClause = `
-        ORDER BY
-        u.role DESC,
-        CASE
-            WHEN u.role = 0 THEN COALESCE(r.reports_count, 0)
-            ELSE NULL
-        END DESC,
-        u.name ASC
-        `;
+    //exclui user bloqueadores e bloqueadores se currentID existir
+    if (currentUserId) {
+        whereClause += `
+      AND u.id NOT IN (SELECT blocked_id FROM blocks WHERE blocker_id = ?)
+      AND u.id NOT IN (SELECT blocker_id FROM blocks WHERE blocked_id = ?)
+    `;
+        queryParams.push(currentUserId, currentUserId);
     }
 
     if (sortByFollows) {
         fromClause += `
-        LEFT JOIN follows f ON u.id = f.following_id AND f.follower_id = ?
-        `;
+      LEFT JOIN follows f ON u.id = f.following_id AND f.follower_id = ?
+    `;
         queryParams.push(currentUserId);
-
-        whereClause += ` AND u.id != ? `;
-        queryParams.push(currentUserId);
-
-        if (currentUserId) {
-            whereClause += `
-            AND u.id NOT IN (SELECT blocked_id FROM blocks WHERE blocker_id = ?)
-            AND u.id NOT IN (SELECT blocker_id FROM blocks WHERE blocked_id = ?)
-            `;
-            queryParams.push(currentUserId, currentUserId);
-        }
     }
 
     if (search) {
@@ -119,10 +96,29 @@ server.get("/api/users", (req, res) => {
         queryParams.push(likeSearch, likeSearch);
     }
 
+    let orderByClause;
+    if (sortByFollows) {
+        orderByClause = `
+      ORDER BY
+      CASE WHEN f.following_id IS NOT NULL THEN 0 ELSE 1 END ASC,
+      u.role DESC,
+      u.name ASC
+    `;
+    } else {
+        orderByClause = `
+      ORDER BY
+      u.role DESC,
+      CASE
+        WHEN u.role = 0 THEN COALESCE(r.reports_count, 0)
+        ELSE NULL
+      END DESC,
+      u.name ASC
+    `;
+    }
+
     const countSql = `SELECT COUNT(u.id) as total ${fromClause} ${whereClause}`;
     db.query(countSql, queryParams, (errCount, countResult) => {
         if (errCount) {
-            console.error('Erro ao contar usuários:', errCount);
             return res.status(500).send({ status: false, message: "Erro ao contar utilizadores." });
         }
 
@@ -131,7 +127,6 @@ server.get("/api/users", (req, res) => {
 
         db.query(usersSql, usersParams, (errUsers, userResult) => {
             if (errUsers) {
-                console.error('Erro ao buscar usuários:', errUsers);
                 return res.status(500).send({ status: false, message: "Erro ao buscar utilizadores." });
             }
 
@@ -142,6 +137,64 @@ server.get("/api/users", (req, res) => {
                     total: countResult[0].total
                 }
             });
+        });
+    });
+});
+
+//para mudança de role (dar ADM, passar de 0 a 1)
+server.put("/api/users/:id/role", (req, res) => {
+    const userIdToChange = parseInt(req.params.id);
+    const { newRole, currentUserId, currentUserRole } = req.body;
+
+    //validação básica
+    if (isNaN(userIdToChange) || !Number.isInteger(newRole) || (newRole !== 0 && newRole !== 1)) {
+        return res.status(400).send({ status: false, message: "Dados de alteração de cargo inválidos." });
+    }
+
+    //apenar o criador (role 2) consegue dar/remover AMD
+    if (currentUserRole !== 2) {
+        return res.status(403).send({ status: false, message: "Permissão negada. Apenas a Criadora pode alterar cargos." });
+    }
+
+    //previne que o criador mude o prórpio cargo (só é possível pela BD)
+    if (userIdToChange === currentUserId) {
+        return res.status(403).send({ status: false, message: "Não é possível alterar o cargo da Criadora através desta interface." });
+    }
+
+    //previve criadores mudarem cargos de outros criadores se existirem mais de um (ação possível apenas pela BD)
+    //obtém o role atual do usuário de destino no banco de dados
+    db.query("SELECT role FROM users WHERE id = ?", [userIdToChange], (err, results) => {
+        if (err) {
+            console.error("Erro ao buscar cargo do usuário alvo:", err);
+            return res.status(500).send({ status: false, message: "Erro interno ao verificar cargo." });
+        }
+        if (results.length === 0) {
+            return res.status(404).send({ status: false, message: "Usuário alvo não encontrado." });
+        }
+
+        const targetUserCurrentRole = results[0].role;
+
+        if (targetUserCurrentRole === 2) {
+            return res.status(403).send({ status: false, message: "Não é possível alterar o cargo de outra Criadora." });
+        }
+
+        //certifica de que o novo role seja válido (0 ou 1) e não tente definir a função de Criador (2)
+        if (newRole !== 0 && newRole !== 1) {
+            return res.status(400).send({ status: false, message: "Novo cargo inválido. Apenas usuária ou administradora são permitidos." });
+        }
+
+        //dá update no novo role
+        const updateRoleSql = "UPDATE users SET role = ? WHERE id = ?";
+        db.query(updateRoleSql, [newRole, userIdToChange], (err, result) => {
+            if (err) {
+                return res.status(500).send({ status: false, message: "Erro ao atualizar cargo do usuário." });
+            }
+            if (result.affectedRows === 0) {
+                return res.status(404).send({ status: false, message: "Usuário não encontrado ou cargo já é o mesmo." });
+            }
+
+            const roleText = newRole === 1 ? "administradora" : "usuária";
+            res.send({ status: true, message: `Cargo atualizado para ${roleText} com sucesso.` });
         });
     });
 });
@@ -479,7 +532,7 @@ server.post('/api/verify-email-code', (req, res) => {
 
     //código valido e n expirado = continua o processo
     const { username, name, password } = pendingData;
-    const insertSql = "INSERT INTO users (username, name, email, password, is_verified) VALUES (?, ?, ?, ?, 1)"; // Set is_verified to 1
+    const insertSql = "INSERT INTO users (username, name, email, password, is_verified) VALUES (?, ?, ?, ?, 1)"; //is_verified para 1
     db.query(insertSql, [username, name, email, password], (error, result) => {
         if (error) {
             console.error("Erro ao inserir usuário após verificação:", error);
@@ -569,7 +622,7 @@ server.delete("/api/users/:id", (req, res) => {
 //atualizar perfil
 server.put('/api/users/:id', (req, res) => {
     const { id } = req.params;
-    // REMOVE email AND password from the destructured body to enforce specific flows
+    //remove o e-mail e a senha do corpo desestruturado para impor fluxos específicos
     const { username, name, bio, profile_pic_url, cover_pic_url } = req.body;
 
     const sql = `
