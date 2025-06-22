@@ -880,7 +880,7 @@ server.get("/api/follows/following/:userId", (req, res) => {
 server.get("/api/follows/following-users/:userId", (req, res) => {
     const userId = req.params.userId;
     const sql = `
-    SELECT u.id, u.username, u.name, u.profile_pic
+    SELECT u.id, u.username, u.name, u.profile_pic, u.role
     FROM follows f
     JOIN users u ON f.following_id = u.id
     WHERE f.follower_id = ? AND u.is_banned = 0`;
@@ -896,7 +896,7 @@ server.get("/api/follows/following-users/:userId", (req, res) => {
 server.get("/api/follows/followers-users/:userId", (req, res) => {
     const userId = req.params.userId;
     const sql = `
-    SELECT u.id, u.username, u.name, u.profile_pic
+    SELECT u.id, u.username, u.name, u.profile_pic, u.role
     FROM follows f
     JOIN users u ON f.follower_id = u.id
     WHERE f.following_id = ? AND u.is_banned = 0
@@ -916,7 +916,7 @@ server.get("/api/posts/following/:userId", (req, res) => {
 
     const params = [userId];
     let sql = `
-      SELECT p.*, u.username, u.name, u.profile_pic
+      SELECT p.*, u.username, u.name, u.profile_pic, u.role
       FROM posts p
       JOIN users u ON p.user_id = u.id
       WHERE p.user_id IN (
@@ -1181,6 +1181,7 @@ server.get("/api/posts", (req, res) => {
     let sql = `
         SELECT p.*,
             u.username,
+            u.role,
             u.name,
             u.profile_pic,
             (SELECT COUNT(*) FROM likes l WHERE l.post_id = p.id) AS likes_count,
@@ -1276,6 +1277,7 @@ server.get("/api/posts/:id", (req, res) => {
     const sql = `
       SELECT p.*,
       u.username,
+      u.role,
       u.name,
       u.profile_pic,
       (SELECT COUNT(*) FROM likes l WHERE l.post_id = p.id) AS likes_count,
@@ -1296,7 +1298,7 @@ server.get("/api/posts/:id", (req, res) => {
 
         const tagSql = `SELECT tag FROM post_tags WHERE post_id = ?`;
         const commentSql = `
-            SELECT c.id, c.content, c.created_at, c.user_id, c.parent_id, u.username, u.profile_pic
+            SELECT c.id, c.content, c.created_at, c.user_id, c.parent_id, u.username, u.profile_pic, u.role
             FROM comments c
             JOIN users u ON c.user_id = u.id
             WHERE c.post_id = ?
@@ -1664,6 +1666,7 @@ server.get("/api/posts/user/:userId", (req, res) => {
         u.username,
         u.name,
         u.profile_pic,
+        u.role,
         (SELECT COUNT(*) FROM likes l WHERE l.post_id = p.id) AS likes_count,
         (SELECT COUNT(*) FROM comments c WHERE c.post_id = p.id) AS comments_count,
         (SELECT COUNT(*) FROM likes l WHERE l.user_id = ? AND l.post_id = p.id) > 0 AS user_liked,
@@ -1736,6 +1739,7 @@ server.get("/api/posts/liked/:userId", (req, res) => {
              u.username,
              u.name,
              u.profile_pic,
+             u.role,
              (SELECT COUNT(*) FROM likes l WHERE l.post_id = p.id) AS likes_count,
              (SELECT COUNT(*) FROM comments c WHERE c.post_id = p.id) AS comments_count,
              true AS user_liked,
@@ -1808,6 +1812,7 @@ server.get("/api/posts/saved/:userId", (req, res) => {
              u.username,
              u.name,
              u.profile_pic,
+             u.role,
              (SELECT COUNT(*) FROM likes l WHERE l.post_id = p.id) AS likes_count,
              (SELECT COUNT(*) FROM comments c WHERE c.post_id = p.id) AS comments_count,
              (SELECT COUNT(*) FROM likes l WHERE l.user_id = ? AND l.post_id = p.id) > 0 AS user_liked,
@@ -1879,7 +1884,8 @@ server.get("/api/posts/user/:userId/drafts", (req, res) => {
       SELECT p.*,
              u.username,
              u.name,
-             u.profile_pic
+             u.profile_pic,
+             u.role
       FROM posts p
       JOIN users u ON p.user_id = u.id
       WHERE p.user_id = ? AND p.is_draft = 1
@@ -1989,6 +1995,7 @@ server.get("/api/chats/:userId", (req, res) => {
     SELECT
       u.id AS userId,
       u.name AS name,
+      u.role AS role,
       u.username AS username,
       u.profile_pic AS profile_pic,
       MAX(m.created_at) AS lastMessageTime,
