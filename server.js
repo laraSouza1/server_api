@@ -270,9 +270,9 @@ server.post('/api/password-reset-request', (req, res) => {
         const resetLink = `http://localhost:4200/change-password/${user.id}/${token}`;
 
         const mailOptions = {
-            from: 'hearlert.fl@gmail.com',
+            from: 'heralert.fl@gmail.com',
             to: email,
-            subject: 'Redefinição de Palavra-passe Hearlert',
+            subject: 'Redefinição de Palavra-passe Heralert',
             html: `
                 <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
                     <h2>Redefinição de Palavra-passe Heralert</h2>
@@ -414,7 +414,7 @@ const transporter = nodemailer.createTransport({
     service: 'gmail',
     auth: {
         user: 'heralert.fl@gmail.com',
-        pass: 'pjpz rcut ompr xoyb'
+        pass: 'syuq eqtf rakl rsgg'
     }
 });
 
@@ -476,9 +476,9 @@ server.post('/api/initiate-registration', (req, res) => {
 
             //envia email de verificação
             const mailOptions = {
-                from: 'hearlert.fl@gmail.com',
+                from: 'heralert.fl@gmail.com',
                 to: email,
-                subject: 'Código de Verificação Hearlert',
+                subject: 'Código de Verificação Heralert',
                 html: `
           <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
             <h2>Verificação de E-mail para Heralert</h2>
@@ -670,9 +670,9 @@ server.post('/api/initiate-email-update-verification', (req, res) => {
         const expiresAt = new Date(Date.now() + 15 * 60 * 1000); //código válido por 15 minutos
 
         const mailOptions = {
-            from: 'hearlert.fl@gmail.com',
+            from: 'heralert.fl@gmail.com',
             to: newEmail, //manda para o novo email
-            subject: 'Código de Verificação para Atualização de E-mail Hearlert',
+            subject: 'Código de Verificação para Atualização de E-mail Heralert',
             html: `
             <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
                 <h2>Heralert: Verificação de E-mail</h2>
