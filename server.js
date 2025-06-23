@@ -598,22 +598,73 @@ server.get('/api/users/check-username', (req, res) => {
 server.delete("/api/users/:id", (req, res) => {
     const userId = parseInt(req.params.id);
 
-    const deletePosts = "DELETE FROM posts WHERE user_id = ?";
-    const deleteUser = "DELETE FROM users WHERE id = ?";
+    if (isNaN(userId)) {
+        return res.status(400).send({ status: false, message: "ID de usuário inválido." });
+    }
 
-    db.query(deletePosts, [userId], (err) => {
+    db.beginTransaction(err => {
         if (err) {
-            console.error("Erro ao deletar posts:", err);
-            return res.status(500).send({ status: false, message: "Erro ao deletar posts" });
+            console.error("Erro ao iniciar transação para exclusão de conta:", err);
+            return res.status(500).send({ status: false, message: "Erro interno ao excluir conta." });
         }
 
-        db.query(deleteUser, [userId], (err) => {
+        const deleteNotifications = "DELETE FROM notifications WHERE sender_id = ? OR receiver_id = ?";
+        db.query(deleteNotifications, [userId, userId], (err) => {
             if (err) {
-                console.error("Erro ao deletar usuário:", err);
-                return res.status(500).send({ status: false, message: "Erro ao deletar usuário" });
+                return db.rollback(() => {
+                    console.error("Erro ao deletar notificações:", err);
+                    res.status(500).send({ status: false, message: "Erro ao deletar notificações" });
+                });
             }
 
-            res.send({ status: true, message: "Usuário e posts deletados com sucesso" });
+            const deleteComments = "DELETE FROM comments WHERE user_id = ?";
+            db.query(deleteComments, [userId], (err) => {
+                if (err) {
+                    return db.rollback(() => {
+                        console.error("Erro ao deletar comentários:", err);
+                        res.status(500).send({ status: false, message: "Erro ao deletar comentários" });
+                    });
+                }
+
+                const deleteLikes = "DELETE FROM likes WHERE user_id = ?";
+                db.query(deleteLikes, [userId], (err) => {
+                    if (err) {
+                        return db.rollback(() => {
+                            console.error("Erro ao deletar likes:", err);
+                            res.status(500).send({ status: false, message: "Erro ao deletar likes" });
+                        });
+                    }
+
+                    const deletePosts = "DELETE FROM posts WHERE user_id = ?";
+                    db.query(deletePosts, [userId], (err) => {
+                        if (err) {
+                            return db.rollback(() => {
+                                console.error("Erro ao deletar posts:", err);
+                                res.status(500).send({ status: false, message: "Erro ao deletar posts" });
+                            });
+                        }
+
+                        const deleteUser = "DELETE FROM users WHERE id = ?";
+                        db.query(deleteUser, [userId], (err) => {
+                            if (err) {
+                                return db.rollback(() => {
+                                    console.error("Erro ao deletar usuário:", err);
+                                    res.status(500).send({ status: false, message: "Erro ao deletar usuário" });
+                                });
+                            }
+
+                            db.commit(err => {
+                                if (err) {
+                                    return db.rollback(() => {
+                                        res.status(500).send({ status: false, message: "Erro interno ao excluir conta." });
+                                    });
+                                }
+                                res.send({ status: true, message: "Usuário e dados associados deletados com sucesso" });
+                            });
+                        });
+                    });
+                });
+            });
         });
     });
 });
@@ -2921,18 +2972,16 @@ server.get("/api/users/:userId/valid-reports-details", (req, res) => {
 server.put("/api/users/:id/ban", (req, res) => {
     const userIdToBan = parseInt(req.params.id);
     const currentUserRole = req.body.currentUserRole;
-    const currentUserId = req.body.currentUserId; //receber o user ID atual do cliente
+    const currentUserId = req.body.currentUserId;
 
     if (isNaN(userIdToBan)) {
         return res.status(400).send({ status: false, message: "ID de usuário inválido." });
     }
 
-    //previne auto-banimento server-side
     if (currentUserId && userIdToBan === currentUserId) {
         return res.status(403).send({ status: false, message: "Você não pode banir sua própria conta." });
     }
 
-    //pega o role do user que está sendo banido da BD
     const getUserRolesSql = "SELECT role FROM users WHERE id = ?";
     db.query(getUserRolesSql, [userIdToBan], (err, targetUserResults) => {
         if (err) {
@@ -2944,7 +2993,6 @@ server.put("/api/users/:id/ban", (req, res) => {
 
         const targetUserRole = targetUserResults[0].role;
 
-        //check de autorização por níveis 
         if (currentUserRole < targetUserRole || (currentUserRole === targetUserRole && currentUserRole !== 2)) {
             let errorMessage = "Você não tem permissão para banir esta usuária.";
             if (currentUserRole === 1 && targetUserRole === 1) {
@@ -2978,17 +3026,17 @@ server.put("/api/users/:id/ban", (req, res) => {
                 }
 
                 const banUserSql = `
-          UPDATE users
-          SET username = CONCAT('banned_', id),
-          email = CONCAT('banned_', id, '@banned.com'),
-          name = '[Usuário Banido]',
-          bio = NULL,
-          profile_pic = NULL,
-          cover_pic = NULL,
-          password = '',
-          is_banned = 1
-          WHERE id = ?;
-        `;
+                    UPDATE users
+                    SET username = CONCAT('banned_', id),
+                    email = CONCAT('banned_', id, '@banned.com'),
+                    name = '[Usuário Banido]',
+                    bio = NULL,
+                    profile_pic = NULL,
+                    cover_pic = NULL,
+                    password = '',
+                    is_banned = 1
+                    WHERE id = ?;
+                `;
 
                 db.query(banUserSql, [userIdToBan], (err) => {
                     if (err) {
@@ -3006,50 +3054,68 @@ server.put("/api/users/:id/ban", (req, res) => {
                             });
                         }
 
-                        const deletePostsSql = "DELETE FROM posts WHERE user_id = ?";
-                        db.query(deletePostsSql, [userIdToBan], (err) => {
+                        const deleteLikesSql = "DELETE FROM likes WHERE user_id = ?";
+                        db.query(deleteLikesSql, [userIdToBan], (err) => {
                             if (err) {
                                 return db.rollback(() => {
-                                    console.error("Erro ao deletar posts do usuário banido:", err);
-                                    res.status(500).send({ status: false, message: "Erro ao banir usuário (posts)." });
+                                    res.status(500).send({ status: false, message: "Erro ao banir usuário (likes)." });
                                 });
                             }
 
-                            const deleteCommentsSql = "DELETE FROM comments WHERE user_id = ?";
-                            db.query(deleteCommentsSql, [userIdToBan], (err) => {
+                            const deleteNotificationsSql = "DELETE FROM notifications WHERE sender_id = ? OR receiver_id = ?";
+                            db.query(deleteNotificationsSql, [userIdToBan, userIdToBan], (err) => {
                                 if (err) {
                                     return db.rollback(() => {
-                                        console.error("Erro ao deletar comentários do usuário banido:", err);
-                                        res.status(500).send({ status: false, message: "Erro ao banir usuário (comentários)." });
+                                        res.status(500).send({ status: false, message: "Erro ao banir usuário (notificações)." });
                                     });
                                 }
 
-                                const deleteReportsSql = "DELETE FROM reports WHERE reporter_id = ? OR reported_user_id = ?";
-                                db.query(deleteReportsSql, [userIdToBan, userIdToBan], (err) => {
+                                const deletePostsSql = "DELETE FROM posts WHERE user_id = ?";
+                                db.query(deletePostsSql, [userIdToBan], (err) => {
                                     if (err) {
                                         return db.rollback(() => {
-                                            console.error("Erro ao deletar denúncias relacionadas ao usuário banido:", err);
-                                            res.status(500).send({ status: false, message: "Erro ao banir usuário (denúncias)." });
+                                            console.error("Erro ao deletar posts do usuário banido:", err);
+                                            res.status(500).send({ status: false, message: "Erro ao banir usuário (posts)." });
                                         });
                                     }
 
-                                    const deleteChatMessagesSql = "DELETE FROM messages WHERE sender_id = ? OR receiver_id = ?";
-                                    db.query(deleteChatMessagesSql, [userIdToBan, userIdToBan], (err) => {
+                                    const deleteCommentsSql = "DELETE FROM comments WHERE user_id = ?";
+                                    db.query(deleteCommentsSql, [userIdToBan], (err) => {
                                         if (err) {
                                             return db.rollback(() => {
-                                                console.error("Erro ao deletar mensagens de chat do usuário banido:", err);
-                                                res.status(500).send({ status: false, message: "Erro ao banir usuário (chat)." });
+                                                console.error("Erro ao deletar comentários do usuário banido:", err);
+                                                res.status(500).send({ status: false, message: "Erro ao banir usuário (comentários)." });
                                             });
                                         }
 
-                                        db.commit(err => {
+                                        const deleteReportsSql = "DELETE FROM reports WHERE reporter_id = ? OR reported_user_id = ?";
+                                        db.query(deleteReportsSql, [userIdToBan, userIdToBan], (err) => {
                                             if (err) {
                                                 return db.rollback(() => {
-                                                    console.error("Erro ao commitar transação de banimento:", err);
-                                                    res.status(500).send({ status: false, message: "Erro interno ao banir usuário." });
+                                                    console.error("Erro ao deletar denúncias relacionadas ao usuário banido:", err);
+                                                    res.status(500).send({ status: false, message: "Erro ao banir usuário (denúncias)." });
                                                 });
                                             }
-                                            res.status(200).send({ status: true, message: `Usuária ${username} banida com sucesso!` });
+
+                                            const deleteChatMessagesSql = "DELETE FROM messages WHERE sender_id = ? OR receiver_id = ?";
+                                            db.query(deleteChatMessagesSql, [userIdToBan, userIdToBan], (err) => {
+                                                if (err) {
+                                                    return db.rollback(() => {
+                                                        console.error("Erro ao deletar mensagens de chat do usuário banido:", err);
+                                                        res.status(500).send({ status: false, message: "Erro ao banir usuário (chat)." });
+                                                    });
+                                                }
+
+                                                db.commit(err => {
+                                                    if (err) {
+                                                        return db.rollback(() => {
+                                                            console.error("Erro ao commitar transação de banimento:", err);
+                                                            res.status(500).send({ status: false, message: "Erro interno ao banir usuário." });
+                                                        });
+                                                    }
+                                                    res.status(200).send({ status: true, message: `Usuária ${username} banida com sucesso!` });
+                                                });
+                                            });
                                         });
                                     });
                                 });
