@@ -2214,24 +2214,50 @@ server.post("/api/reports", (req, res) => {
 //para deletar uma denúncia
 server.delete("/api/reports/:id", (req, res) => {
     const reportId = req.params.id;
+    const loggedUser = JSON.parse(req.headers['authorization-user'] || '{}');
 
-    if (!reportId) {
-        return res.status(400).send({ status: false, message: "ID da denúncia não fornecido." });
-    }
+    const getReportUserSql = `
+  SELECT r.reporter_id, r.reported_user_id, reported_u.role AS reported_user_role
+  FROM reports r
+  JOIN users reported_u ON r.reported_user_id = reported_u.id
+  WHERE r.id = ? AND r.target_type = 'user'
+`;
 
-    const sql = `DELETE FROM reports WHERE id = ?`;
-
-    db.query(sql, [reportId], (error, results) => {
-        if (error) {
-            console.error("Erro ao deletar denúncia:", error);
-            return res.status(500).send({ status: false, message: "Erro interno ao deletar denúncia." });
-        }
-
-        if (results.affectedRows === 0) {
+    db.query(getReportUserSql, [reportId], (err, results) => {
+        if (err || results.length === 0) {
             return res.status(404).send({ status: false, message: "Denúncia não encontrada." });
         }
 
-        res.status(200).send({ status: true, message: "Denúncia deletada com sucesso!" });
+        const report = results[0];
+
+        if (
+            loggedUser.role === 1 && (
+                report.reporter_id === loggedUser.id ||
+                report.reported_user_id === loggedUser.id ||
+                report.reported_user_role >= 1
+            )
+        ) {
+            return res.status(403).send({ status: false, message: "Você não tem permissão para deletar esta denúncia." });
+        }
+
+        if (!reportId) {
+            return res.status(400).send({ status: false, message: "ID da denúncia não fornecido." });
+        }
+
+        const sql = `DELETE FROM reports WHERE id = ?`;
+
+        db.query(sql, [reportId], (error, results) => {
+            if (error) {
+                console.error("Erro ao deletar denúncia:", error);
+                return res.status(500).send({ status: false, message: "Erro interno ao deletar denúncia." });
+            }
+
+            if (results.affectedRows === 0) {
+                return res.status(404).send({ status: false, message: "Denúncia não encontrada." });
+            }
+
+            res.status(200).send({ status: true, message: "Denúncia deletada com sucesso!" });
+        });
     });
 });
 
@@ -2255,7 +2281,8 @@ server.get("/api/reports", (req, res) => {
             COALESCE(p_post.community, p_comment.community) AS post_community,
             COALESCE(p_post.id, p_comment.id) AS post_id,
             c.content AS comment_text,
-            c.post_id AS comment_post_id
+            c.post_id AS comment_post_id,
+            reported_u.role AS reported_user_role 
         FROM heralert.reports r
         JOIN users rep_u ON r.reporter_id = rep_u.id
         JOIN users reported_u ON r.reported_user_id = reported_u.id
@@ -2560,7 +2587,7 @@ server.get("/api/reports/by-reporter/:reporterId", (req, res) => {
     JOIN users reported_u ON r.reported_user_id = reported_u.id
     LEFT JOIN comments c ON r.target_type = 'comment' AND r.target_id = c.id
     LEFT JOIN posts p ON r.target_type = 'post' AND r.target_id = p.id
-    WHERE r.reporter_id = ? AND r.reporter_deleted = FALSE -- Adiciona esta condição para não buscar denúncias deletadas pelo denunciante
+    WHERE r.reporter_id = ? AND r.reporter_deleted = FALSE
     ORDER BY r.created_at DESC;
     `;
 
@@ -2671,104 +2698,137 @@ server.put("/api/user-reports/:id/status", (req, res) => {
     const reportId = req.params.id;
     const { status, reason } = req.body;
 
+    //validação inicial do status
     if (!status) {
         return res.status(400).send({ status: false, message: "Status é obrigatório." });
     }
 
+    //validação do motivo se necessário
     if ((status === 'nao_justificado' || status === 'justificado') && !reason) {
         return res.status(400).send({ status: false, message: "O motivo do estado é obrigatório para este status." });
     }
 
-    //obtem os detalhes da denúncia e a contagem atual de denúncias válidas
+    //SQL para obter os detalhes da denúncia
     const getReportDetailsSql = `
     SELECT
       r.reporter_id,
       r.reported_user_id,
       r.status AS current_report_status,
       reported_u.username AS reported_username,
-      (SELECT COUNT(*) FROM reports WHERE reported_user_id = r.reported_user_id AND target_type = 'user' AND status = 'justificado') AS current_total_valid_user_reports_count
+      reported_u.role AS reported_user_role,
+      (
+        SELECT COUNT(*) FROM reports
+        WHERE reported_user_id = r.reported_user_id
+        AND target_type = 'user'
+        AND status = 'justificado'
+      ) AS current_total_valid_user_reports_count
     FROM heralert.reports r
     JOIN users reported_u ON r.reported_user_id = reported_u.id
     WHERE r.id = ? AND r.target_type = 'user'
   `;
 
     db.query(getReportDetailsSql, [reportId], (err, reportDetails) => {
+        //verifica erro da query
         if (err) {
             return res.status(500).send({ status: false, message: "Erro interno ao buscar detalhes da denúncia de usuário." });
         }
+
+        //nenhuma denúncia encontrada
         if (reportDetails.length === 0) {
             return res.status(404).send({ status: false, message: "Denúncia de usuário não encontrada ou não é do tipo 'user'." });
         }
 
-        const reporterId = reportDetails[0].reporter_id;
-        const reportedUserId = reportDetails[0].reported_user_id;
-        const reportedUsername = reportDetails[0].reported_username;
-        const currentReportStatus = reportDetails[0].current_report_status; //status atual da denúncia
-        let totalValidUserReportsCount = reportDetails[0].current_total_valid_user_reports_count;
+        //extrai dados da denúncia
+        const {
+            reporter_id: reporterId,
+            reported_user_id: reportedUserId,
+            reported_username: reportedUsername,
+            reported_user_role: reportedUserRole,
+            current_report_status: currentReportStatus,
+            current_total_valid_user_reports_count: currentTotalValidUserReportsCount
+        } = reportDetails[0];
 
-        //ajuste a contagem de denúncias válidas com base na mudança de status
+        const loggedUser = JSON.parse(req.headers['authorization-user'] || '{}');
+
+        //valida autenticação
+        if (!loggedUser || !loggedUser.id || loggedUser.role === undefined) {
+            return res.status(403).send({ status: false, message: "Usuária não autenticada." });
+        }
+
+        //verifica permissões de alteração (nível 1 não pode alterar denúncias de admins, criadora, nem suas próprias)
+        if (
+            loggedUser.role === 1 && (
+                reportedUserId === loggedUser.id ||
+                reporterId === loggedUser.id ||
+                reportedUserRole >= 1
+            )
+        ) {
+            return res.status(403).send({ status: false, message: "Você não tem permissão para alterar o status desta denúncia." });
+        }
+
+        //ajusta contagem de denúncias válidas
+        let totalValidUserReportsCount = currentTotalValidUserReportsCount;
         if (status === 'justificado' && currentReportStatus !== 'justificado') {
-            //se o novo status é 'justificado' e o anterior não era 'justificado', incrementa
             totalValidUserReportsCount++;
         } else if (status === 'nao_justificado' && currentReportStatus === 'justificado') {
-            //se o novo status é 'nao_justificado' e o anterior era 'justificado', decrementa
             totalValidUserReportsCount--;
         }
-        //se o status não mudou ou mudou para 'em_avaliacao', a contagem permanece a mesma para a lógica de banimento.
 
-        const sql = `
+        //atualiza status da denúncia
+        const updateSql = `
       UPDATE heralert.reports
       SET status = ?, status_reason_text = ?
       WHERE id = ? AND target_type = 'user'
     `;
 
-        db.query(sql, [status, reason, reportId], (error, results) => {
-            if (error) {
+        db.query(updateSql, [status, reason, reportId], (updateErr, updateRes) => {
+            if (updateErr) {
                 return res.status(500).send({ status: false, message: "Erro interno ao atualizar status da denúncia de usuário." });
             }
-            if (results.affectedRows === 0) {
+
+            if (updateRes.affectedRows === 0) {
                 return res.status(404).send({ status: false, message: "Denúncia de usuário não encontrada ou não é do tipo 'user'." });
             }
 
+            //envia resposta principal
             res.status(200).send({ status: true, message: "Status da denúncia de usuário atualizado com sucesso." });
 
-            const adminSenderId = 0; //ID para o "sistema" ou "administrador"
+            const adminSenderId = 0;
             const insertNotificationSql = `
         INSERT INTO notifications (receiver_id, sender_id, type, message)
         VALUES (?, ?, ?, ?)
       `;
 
-            //notificação para o DENUNCIANTE
+            //mensagem para denunciante
             let notificationMessageToReporter = '';
             if (status === 'justificado') {
-                if (totalValidUserReportsCount >= 3) { //se o banimento ocorrer
+                if (totalValidUserReportsCount >= 3) {
                     notificationMessageToReporter = `Recebemos sua denúncia contra o usuário ${reportedUsername} e, após uma avaliação, ela se conferiu válida. Logo, a usuária foi banida. Para mais detalhes, acesse "Minhas Denúncias" nas configurações do seu perfil.`;
                 } else {
                     notificationMessageToReporter = `Recebemos sua denúncia contra o usuário ${reportedUsername} e, após uma avaliação, ela se conferiu válida. A usuária foi notificada sobre isso. Para mais detalhes, acesse "Minhas Denúncias" nas configurações do seu perfil.`;
                 }
-            } else { //status === 'nao_justificado'
+            } else {
                 notificationMessageToReporter = `Recebemos sua denúncia contra o usuário ${reportedUsername} e, após uma avaliação, ela não se conferiu válida. Para mais detalhes, acesse "Minhas Denúncias" nas configurações do seu perfil.`;
             }
 
             db.query(insertNotificationSql, [reporterId, adminSenderId, 'report_outcome_user_admin', notificationMessageToReporter], (notifErr) => {
                 if (notifErr) {
-                    console.error("Erro (fire-and-forget) ao criar notificação de resultado da denúncia de usuário para o denunciante:", notifErr);
+                    console.error("Erro ao notificar denunciante:", notifErr);
                 }
             });
 
-            //notificação para o USUÁRIO DENUNCIADO (apenas se a denujncia for válida)
+            //mensagem para denunciado (caso válido)
             if (status === 'justificado' && reportedUserId !== reporterId) {
                 let notificationMessageToReportedUser = '';
                 if (totalValidUserReportsCount >= 3) {
-                    notificationMessageToReportedUser = `Recebemos uma denúncia contra você que se conferiu verdadeira. Você atingiu o número minímo de denúncias válidas, e em breve será banida. Caso ache ser engano, contacte @heralert ou heralert.fl@gmail.com`;
-
+                    notificationMessageToReportedUser = `Recebemos uma denúncia contra você que se conferiu verdadeira. Você atingiu o número mínimo de denúncias válidas, e em breve será banida. Caso ache ser engano, contacte @heralert ou heralert.fl@gmail.com.`;
                 } else {
                     notificationMessageToReportedUser = `Recebemos uma denúncia contra você e, após uma avaliação, ela se conferiu válida. Atualmente você tem ${totalValidUserReportsCount} denúncia(s) válida(s) associada(s) à sua conta. Ao atingir 3 ou mais denúncias válidas, você será banida.`;
                 }
 
                 db.query(insertNotificationSql, [reportedUserId, adminSenderId, 'report_outcome_user_admin', notificationMessageToReportedUser], (notifErr) => {
                     if (notifErr) {
-                        console.error("Erro (fire-and-forget) ao criar notificação de resultado da denúncia de usuário para o denunciado:", notifErr);
+                        console.error("Erro ao notificar denunciado:", notifErr);
                     }
                 });
             }
