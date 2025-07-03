@@ -2279,43 +2279,44 @@ server.delete("/api/reports/:id", (req, res) => {
     const reportId = req.params.id;
     const loggedUser = JSON.parse(req.headers['authorization-user'] || '{}');
 
-    const getReportUserSql = `
-  SELECT r.reporter_id, r.reported_user_id, reported_u.role AS reported_user_role
-  FROM reports r
-  JOIN users reported_u ON r.reported_user_id = reported_u.id
-  WHERE r.id = ? AND r.target_type = 'user'
-`;
+    const getReportDetailsSql = `
+        SELECT r.reporter_id, r.reported_user_id, reported_u.role AS reported_user_role, r.target_type
+        FROM reports r
+        JOIN users reported_u ON r.reported_user_id = reported_u.id
+        WHERE r.id = ?
+    `;
 
-    db.query(getReportUserSql, [reportId], (err, results) => {
-        if (err || results.length === 0) {
+    db.query(getReportDetailsSql, [reportId], (err, results) => {
+        if (err) {
+            return res.status(500).send({ status: false, message: "Erro interno ao buscar detalhes da denúncia." });
+        }
+        if (results.length === 0) {
             return res.status(404).send({ status: false, message: "Denúncia não encontrada." });
         }
 
         const report = results[0];
 
-        if (
-            loggedUser.role === 1 && (
-                report.reporter_id === loggedUser.id ||
-                report.reported_user_id === loggedUser.id ||
-                report.reported_user_role >= 1
-            )
-        ) {
+        //lógica de permissão
+        //permite criadores (role 2) deletarem qualquer denúncia
+        //permite (role 1) deletarem apenas denúncias de usuários (role 0)
+        if (loggedUser.role < 2 && report.reported_user_role >= loggedUser.role) {
             return res.status(403).send({ status: false, message: "Você não tem permissão para deletar esta denúncia." });
         }
 
-        if (!reportId) {
+
+        if (!reportId) { // This check is redundant here as reportId comes from params
             return res.status(400).send({ status: false, message: "ID da denúncia não fornecido." });
         }
 
         const sql = `DELETE FROM reports WHERE id = ?`;
 
-        db.query(sql, [reportId], (error, results) => {
+        db.query(sql, [reportId], (error, deleteResults) => { // Renamed 'results' to 'deleteResults' to avoid conflict
             if (error) {
                 console.error("Erro ao deletar denúncia:", error);
                 return res.status(500).send({ status: false, message: "Erro interno ao deletar denúncia." });
             }
 
-            if (results.affectedRows === 0) {
+            if (deleteResults.affectedRows === 0) {
                 return res.status(404).send({ status: false, message: "Denúncia não encontrada." });
             }
 
@@ -2773,26 +2774,27 @@ server.put("/api/user-reports/:id/status", (req, res) => {
 
     //SQL para obter os detalhes da denúncia
     const getReportDetailsSql = `
-    SELECT
-      r.reporter_id,
-      r.reported_user_id,
-      r.status AS current_report_status,
-      reported_u.username AS reported_username,
-      reported_u.role AS reported_user_role,
-      (
-        SELECT COUNT(*) FROM reports
-        WHERE reported_user_id = r.reported_user_id
-        AND target_type = 'user'
-        AND status = 'justificado'
-      ) AS current_total_valid_user_reports_count
-    FROM heralert.reports r
-    JOIN users reported_u ON r.reported_user_id = reported_u.id
-    WHERE r.id = ? AND r.target_type = 'user'
-  `;
+        SELECT
+            r.reporter_id,
+            r.reported_user_id,
+            r.status AS current_report_status,
+            reported_u.username AS reported_username,
+            reported_u.role AS reported_user_role,
+            (
+                SELECT COUNT(*) FROM reports
+                WHERE reported_user_id = r.reported_user_id
+                AND target_type = 'user'
+                AND status = 'justificado'
+            ) AS current_total_valid_user_reports_count
+        FROM heralert.reports r
+        JOIN users reported_u ON r.reported_user_id = reported_u.id
+        WHERE r.id = ? AND r.target_type = 'user'
+    `;
 
     db.query(getReportDetailsSql, [reportId], (err, reportDetails) => {
         //verifica erro da query
         if (err) {
+            console.error("Erro ao buscar detalhes da denúncia de usuário:", err);
             return res.status(500).send({ status: false, message: "Erro interno ao buscar detalhes da denúncia de usuário." });
         }
 
@@ -2818,14 +2820,10 @@ server.put("/api/user-reports/:id/status", (req, res) => {
             return res.status(403).send({ status: false, message: "Usuária não autenticada." });
         }
 
-        //verifica permissões de alteração (nível 1 não pode alterar denúncias de admins, criadora, nem suas próprias)
-        if (
-            loggedUser.role === 1 && (
-                reportedUserId === loggedUser.id ||
-                reporterId === loggedUser.id ||
-                reportedUserRole >= 1
-            )
-        ) {
+        //lógica de permissão
+        //permite criadores (role 2) atualizar qualquer denúncia
+        //permite (role 1) atualizarem apenas denúncias de usuários (role 0)
+        if (loggedUser.role < 2 && reportedUserRole >= loggedUser.role) {
             return res.status(403).send({ status: false, message: "Você não tem permissão para alterar o status desta denúncia." });
         }
 
@@ -2839,10 +2837,10 @@ server.put("/api/user-reports/:id/status", (req, res) => {
 
         //atualiza status da denúncia
         const updateSql = `
-      UPDATE heralert.reports
-      SET status = ?, status_reason_text = ?
-      WHERE id = ? AND target_type = 'user'
-    `;
+            UPDATE heralert.reports
+            SET status = ?, status_reason_text = ?
+            WHERE id = ? AND target_type = 'user'
+        `;
 
         db.query(updateSql, [status, reason, reportId], (updateErr, updateRes) => {
             if (updateErr) {
@@ -2858,9 +2856,9 @@ server.put("/api/user-reports/:id/status", (req, res) => {
 
             const adminSenderId = 0;
             const insertNotificationSql = `
-        INSERT INTO notifications (receiver_id, sender_id, type, message)
-        VALUES (?, ?, ?, ?)
-      `;
+                INSERT INTO notifications (receiver_id, sender_id, type, message)
+                VALUES (?, ?, ?, ?)
+            `;
 
             //mensagem para denunciante
             let notificationMessageToReporter = '';
